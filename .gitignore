@@ -1,0 +1,19 @@
+# data & artifacts
+data/
+cache/
+*.sqlite3
+hypotheses*.jsonl
+*.jsonl.log
+
+# env / secrets
+.env
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
