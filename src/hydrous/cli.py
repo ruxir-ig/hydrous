@@ -1,4 +1,4 @@
-"""hydra-mem CLI: download-data / ingest / answer / eval / judge / report."""
+"""hydrous CLI: download-data / ingest / answer / eval / judge / report."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .retrieve.pipeline import RetrievalPipeline
 from .store.local import LocalMemoryStore
 
 app = typer.Typer(
-    help="HydraMem — agent memory layer for cross-session continuity", no_args_is_help=True
+    help="Hydrous — agent memory layer for cross-session continuity", no_args_is_help=True
 )
 
 ORACLE_URL = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json"

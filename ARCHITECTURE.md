@@ -1,6 +1,6 @@
-# HydraMem — Architecture (THE single living doc)
+# Hydrous — Architecture (THE single living doc)
 
-Agent memory layer for cross-session continuity. Hack with Hydra hackathon, deadline 2026-08-16.
+Agent memory layer for cross-session continuity.
 This is the ONLY design doc. Keep it updated as the code changes. No other .md files except README.md (a pointer here).
 
 ## Problem statement
@@ -61,7 +61,7 @@ Answer questions over chat histories spanning 30–40 sessions / ~115K tokens pe
             eval/metrics.py → overall + per-question_type + abstention-subset accuracy
 ```
 
-## Module map (`src/hydra_mem/`)
+## Module map (`src/hydrous/`)
 
 | Module | Responsibility |
 |---|---|
@@ -182,7 +182,7 @@ evidence echo; judge → overlap / IDK detection). Every LLM call is recorded in
 
 ### Local (default)
 
-SQLite at `STORE_PATH` (default `data/hydra_mem.sqlite3`). Tables: `sessions`, `turns`,
+SQLite at `STORE_PATH` (default `data/hydrous.sqlite3`). Tables: `sessions`, `turns`,
 `facts`, `meta`. Embeddings stored as float32 blobs; per-question corpus is small (~40 sessions,
 ≤ a few hundred facts) so search loads that question's rows, computes cosine in numpy, and
 builds BM25 on the fly. Hybrid merge = RRF.
@@ -207,17 +207,17 @@ only when `HYDRA_DB_API_KEY` is set.
 ```bash
 uv sync                              # create venv + install deps
 cp .env.example .env                 # set LLM_PROVIDER + key + model
-uv run hydra-mem download-data       # fetch LongMemEval oracle + s_cleaned into data/
+uv run hydrous download-data       # fetch LongMemEval oracle + s_cleaned into data/
 
 # deterministic smoke run, NO api key needed:
-uv run hydra-mem eval --dataset data/longmemeval_oracle.json --limit 5 --mock --out hyp_mock.jsonl
-uv run hydra-mem judge --hypotheses hyp_mock.jsonl --dataset data/longmemeval_oracle.json --mock
-uv run hydra-mem report --log hyp_mock.jsonl.log
+uv run hydrous eval --dataset data/longmemeval_oracle.json --limit 5 --mock --out hyp_mock.jsonl
+uv run hydrous judge --hypotheses hyp_mock.jsonl --dataset data/longmemeval_oracle.json --mock
+uv run hydrous report --log hyp_mock.jsonl.log
 
 # real run (subset first!):
-uv run hydra-mem eval --limit 10 --type knowledge-update --out hyp.jsonl
-uv run hydra-mem judge --hypotheses hyp.jsonl --dataset data/longmemeval_s_cleaned.json
-uv run hydra-mem report --log hyp.jsonl.log
+uv run hydrous eval --limit 10 --type knowledge-update --out hyp.jsonl
+uv run hydrous judge --hypotheses hyp.jsonl --dataset data/longmemeval_s_cleaned.json
+uv run hydrous report --log hyp.jsonl.log
 
 uv run pytest                        # all green with MockLLM, no network, no key
 uv run ruff check
@@ -261,7 +261,7 @@ uv run ruff check
     If you edit the extraction PROMPT, delete `cache/` manually to re-extract.
   - Fact ids are deterministic (sha1 of content) so cache reloads reproduce identical facts.
   - Changing `EMBEDDING_BACKEND`/`EMBEDDING_MODEL` on an existing store breaks (embedding dim
-    mismatch) — delete `data/hydra_mem.sqlite3` when switching.
+    mismatch) — delete `data/hydrous.sqlite3` when switching.
   - Verified default embedding path: bge-small-en-v1.5 downloads and embeds (384-d); tests use
     the stateless TfidfEmbedder so they need no network or model download.
   - MockLLM's heuristic handler is intentionally dumb (keyword overlap) — mock e2e answers are

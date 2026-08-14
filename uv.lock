@@ -292,7 +292,20 @@ wheels = [
 ]
 
 [[package]]
-name = "hydra-mem"
+name = "hydradb-sdk"
+version = "2.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0f/38/4094421b31212365ffbd6d5c44bbe7fc421933060995c1417535fc8ed3f5/hydradb_sdk-2.1.2.tar.gz", hash = "sha256:6a1627dafb30ce9ae889cc6993b07fbbc42b5c66a22ccdd90a7725dc22bc1776", size = 101607, upload-time = "2026-07-23T07:27:31.408Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/3a/f55adbbe2fdf9dddd4f68e593965b163fb493d7671896f36f25b4c3e1206/hydradb_sdk-2.1.2-py3-none-any.whl", hash = "sha256:0d814e7d03e6275daef840b8f1639469957407bcbb38d1cea720b57a74a0cfa1", size = 155832, upload-time = "2026-07-23T07:27:30.183Z" },
+]
+
+[[package]]
+name = "hydrous"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -334,19 +347,6 @@ provides-extras = ["hydra"]
 dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.6" },
-]
-
-[[package]]
-name = "hydradb-sdk"
-version = "2.1.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/0f/38/4094421b31212365ffbd6d5c44bbe7fc421933060995c1417535fc8ed3f5/hydradb_sdk-2.1.2.tar.gz", hash = "sha256:6a1627dafb30ce9ae889cc6993b07fbbc42b5c66a22ccdd90a7725dc22bc1776", size = 101607, upload-time = "2026-07-23T07:27:31.408Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/66/3a/f55adbbe2fdf9dddd4f68e593965b163fb493d7671896f36f25b4c3e1206/hydradb_sdk-2.1.2-py3-none-any.whl", hash = "sha256:0d814e7d03e6275daef840b8f1639469957407bcbb38d1cea720b57a74a0cfa1", size = 155832, upload-time = "2026-07-23T07:27:30.183Z" },
 ]
 
 [[package]]

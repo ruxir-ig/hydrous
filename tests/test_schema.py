@@ -1,4 +1,4 @@
-from hydra_mem.schema import EvalInstance, Evidence, EvidencePack, Fact
+from hydrous.schema import EvalInstance, Evidence, EvidencePack, Fact
 
 
 def _fact(valid_from="2023-05-01", valid_to=None) -> Fact:

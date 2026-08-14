@@ -1,5 +1,5 @@
-from hydra_mem.schema import Fact, Session, Turn
-from hydra_mem.store.local import LocalMemoryStore
+from hydrous.schema import Fact, Session, Turn
+from hydrous.store.local import LocalMemoryStore
 
 from .conftest import run
 

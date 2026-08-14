@@ -1,15 +1,15 @@
 import json
 
-from hydra_mem.answer.reader import Answerer
-from hydra_mem.embeddings import TfidfEmbedder
-from hydra_mem.eval.judge import judge_hypotheses, select_template
-from hydra_mem.eval.metrics import compute_metrics, format_metrics
-from hydra_mem.eval.runner import EvalRunner, load_completed_ids
-from hydra_mem.ingest.extractor import FactExtractor
-from hydra_mem.llm import MockLLM
-from hydra_mem.retrieve.pipeline import RetrievalPipeline
-from hydra_mem.schema import ABSTAIN_STRING
-from hydra_mem.store.local import LocalMemoryStore
+from hydrous.answer.reader import Answerer
+from hydrous.embeddings import TfidfEmbedder
+from hydrous.eval.judge import judge_hypotheses, select_template
+from hydrous.eval.metrics import compute_metrics, format_metrics
+from hydrous.eval.runner import EvalRunner, load_completed_ids
+from hydrous.ingest.extractor import FactExtractor
+from hydrous.llm import MockLLM
+from hydrous.retrieve.pipeline import RetrievalPipeline
+from hydrous.schema import ABSTAIN_STRING
+from hydrous.store.local import LocalMemoryStore
 
 from .conftest import run
 

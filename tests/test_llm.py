@@ -5,9 +5,9 @@ import httpx
 import pytest
 from openai import APIStatusError, RateLimitError
 
-from hydra_mem import prompts
-from hydra_mem.llm import MockLLM, OpenAICompatibleLLM, default_mock_handler
-from hydra_mem.schema import ABSTAIN_STRING, Session, Turn
+from hydrous import prompts
+from hydrous.llm import MockLLM, OpenAICompatibleLLM, default_mock_handler
+from hydrous.schema import ABSTAIN_STRING, Session, Turn
 
 from .conftest import run
 
@@ -127,7 +127,7 @@ def test_retry_recovers_from_rate_limit():
     )
     llm_chat = llm.chat([{"role": "user", "content": "hi"}])
     # patch out the backoff sleep so the test is instant
-    import hydra_mem.llm as llm_mod
+    import hydrous.llm as llm_mod
 
     orig_sleep = llm_mod.asyncio.sleep
 

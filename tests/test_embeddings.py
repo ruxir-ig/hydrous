@@ -1,6 +1,6 @@
 import numpy as np
 
-from hydra_mem.embeddings import TfidfEmbedder, build_embedder
+from hydrous.embeddings import TfidfEmbedder, build_embedder
 
 
 def test_tfidf_shape_and_normalization():

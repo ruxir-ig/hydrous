@@ -1,8 +1,8 @@
 import json
 import re
 
-from hydra_mem.ingest.extractor import FactExtractor, parse_json_array
-from hydra_mem.llm import MockLLM, default_mock_handler
+from hydrous.ingest.extractor import FactExtractor, parse_json_array
+from hydrous.llm import MockLLM, default_mock_handler
 
 from .conftest import run
 

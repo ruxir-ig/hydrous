@@ -81,7 +81,7 @@ class HydraDBStore(MemoryStore):
         self,
         api_key: str,
         *,
-        database: str = "hydra_mem",
+        database: str = "hydrous",
         poll_interval: float = 5.0,
         poll_timeout: float = 600.0,
     ):

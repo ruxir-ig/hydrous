@@ -1,7 +1,7 @@
 import pytest
 
-from hydra_mem.config import Settings, build_llm
-from hydra_mem.llm import MockLLM, OpenAICompatibleLLM
+from hydrous.config import Settings, build_llm
+from hydrous.llm import MockLLM, OpenAICompatibleLLM
 
 
 def _settings(**kwargs) -> Settings:

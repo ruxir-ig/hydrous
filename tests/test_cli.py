@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from hydra_mem.cli import app
+from hydrous.cli import app
 
 runner = CliRunner()
 

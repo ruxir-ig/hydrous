@@ -1,8 +1,8 @@
-from hydra_mem import prompts
-from hydra_mem.answer.reader import Answerer
-from hydra_mem.llm import MockLLM, default_mock_handler
-from hydra_mem.retrieve.pipeline import RetrievalPipeline
-from hydra_mem.schema import ABSTAIN_STRING, Fact
+from hydrous import prompts
+from hydrous.answer.reader import Answerer
+from hydrous.llm import MockLLM, default_mock_handler
+from hydrous.retrieve.pipeline import RetrievalPipeline
+from hydrous.schema import ABSTAIN_STRING, Fact
 
 from .conftest import run
 

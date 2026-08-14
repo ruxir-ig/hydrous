@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from hydra_mem.text_utils import compare_dates, content_words, date_key, parse_date, tokenize, word_overlap
+from hydrous.text_utils import compare_dates, content_words, date_key, parse_date, tokenize, word_overlap
 
 
 def test_parse_longmemeval_format():

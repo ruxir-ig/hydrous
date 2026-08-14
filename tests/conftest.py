@@ -4,10 +4,10 @@ import asyncio
 
 import pytest
 
-from hydra_mem.embeddings import TfidfEmbedder
-from hydra_mem.llm import MockLLM
-from hydra_mem.schema import Session, Turn
-from hydra_mem.store.local import LocalMemoryStore
+from hydrous.embeddings import TfidfEmbedder
+from hydrous.llm import MockLLM
+from hydrous.schema import Session, Turn
+from hydrous.store.local import LocalMemoryStore
 
 
 def run(coro):

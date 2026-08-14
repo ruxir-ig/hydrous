@@ -1,6 +1,6 @@
-from hydra_mem.llm import MockLLM, default_mock_handler
-from hydra_mem.retrieve.pipeline import RetrievalPipeline, parse_json_object
-from hydra_mem.schema import Fact, Session, Turn
+from hydrous.llm import MockLLM, default_mock_handler
+from hydrous.retrieve.pipeline import RetrievalPipeline, parse_json_object
+from hydrous.schema import Fact, Session, Turn
 
 from .conftest import run
 
@@ -37,7 +37,7 @@ def test_retrieve_chronological_and_as_of(store, mock_llm):
     assert all(ev.fact_id != "f_old" for ev in pack.items)
     assert any(ev.fact_id == "f_new" for ev in pack.items)
     # chronological order (dates non-decreasing)
-    from hydra_mem.text_utils import date_key
+    from hydrous.text_utils import date_key
 
     dates = [date_key(ev.date) for ev in pack.items]
     assert dates == sorted(dates)

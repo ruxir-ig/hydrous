@@ -1,6 +1,6 @@
 import json
 
-from hydra_mem.ingest.longmemeval import (
+from hydrous.ingest.longmemeval import (
     iter_instances,
     iter_json_array,
     load_gold_index,

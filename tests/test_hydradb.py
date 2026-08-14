@@ -4,8 +4,8 @@ import os
 
 import pytest
 
-from hydra_mem.schema import Fact, Session, Turn
-from hydra_mem.store.hydradb import HydraDBStore, fact_to_memory_item, session_to_memory_item
+from hydrous.schema import Fact, Session, Turn
+from hydrous.store.hydradb import HydraDBStore, fact_to_memory_item, session_to_memory_item
 
 from .conftest import run
 
@@ -69,7 +69,7 @@ def test_store_requires_sdk_with_clear_error():
 
 @pytest.mark.skipif(not os.environ.get("HYDRA_DB_API_KEY"), reason="HYDRA_DB_API_KEY not set")
 def test_hydradb_integration_roundtrip():
-    store = HydraDBStore(os.environ["HYDRA_DB_API_KEY"], database="hydra_mem_test")
+    store = HydraDBStore(os.environ["HYDRA_DB_API_KEY"], database="hydrous_test")
     run(store.add_facts("qtest", [_fact()]))
     results = run(store.search("qtest", "where does the user live", as_of_date="2023-06-01"))
     assert results

@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     hydra_db_api_key: str | None = None
 
     data_dir: Path = Path("data")
-    store_path: Path = Path("data/hydra_mem.sqlite3")
+    store_path: Path = Path("data/hydrous.sqlite3")
     cache_dir: Path = Path("cache")
     max_concurrency: int = 8
     top_k: int = 12

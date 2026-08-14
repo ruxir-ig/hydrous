@@ -1,4 +1,4 @@
-"""Core data models for HydraMem."""
+"""Core data models for Hydrous."""
 
 from __future__ import annotations
 

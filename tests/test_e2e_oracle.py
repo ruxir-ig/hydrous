@@ -10,15 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from hydra_mem.answer.reader import Answerer
-from hydra_mem.embeddings import TfidfEmbedder
-from hydra_mem.eval.judge import judge_hypotheses
-from hydra_mem.eval.metrics import compute_metrics
-from hydra_mem.eval.runner import EvalRunner
-from hydra_mem.ingest.extractor import FactExtractor
-from hydra_mem.llm import MockLLM
-from hydra_mem.retrieve.pipeline import RetrievalPipeline
-from hydra_mem.store.local import LocalMemoryStore
+from hydrous.answer.reader import Answerer
+from hydrous.embeddings import TfidfEmbedder
+from hydrous.eval.judge import judge_hypotheses
+from hydrous.eval.metrics import compute_metrics
+from hydrous.eval.runner import EvalRunner
+from hydrous.ingest.extractor import FactExtractor
+from hydrous.llm import MockLLM
+from hydrous.retrieve.pipeline import RetrievalPipeline
+from hydrous.store.local import LocalMemoryStore
 
 from .conftest import run
 
