@@ -61,7 +61,9 @@ class RetrievalPipeline:
         if not self._use_query_analysis:
             return QueryAnalysis(rewritten_query=question)
         try:
-            resp = await self._llm.chat(prompts.query_analysis_messages(question, question_date))
+            resp = await self._llm.chat(
+                prompts.query_analysis_messages(question, question_date)
+            )
             data = parse_json_object(resp)
             if not data:
                 raise ValueError("empty analysis")
@@ -100,5 +102,10 @@ class RetrievalPipeline:
                     best[ev.key] = ev
 
         items = sorted(best.values(), key=lambda e: e.score, reverse=True)[:top_k]
-        pack = EvidencePack(question=question, question_date=question_date, items=items)
+        pack = EvidencePack(
+            question=question,
+            question_date=question_date,
+            items=items,
+            question_type_hint=analysis.question_type_hint,
+        )
         return pack.chronological()

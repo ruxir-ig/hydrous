@@ -79,31 +79,68 @@ class EvidencePack(BaseModel):
     question: str
     question_date: str
     items: list[Evidence] = Field(default_factory=list)
+    question_type_hint: str | None = None
 
     def chronological(self) -> EvidencePack:
         ordered = sorted(self.items, key=lambda e: (date_key(e.date), e.score))
-        return EvidencePack(question=self.question, question_date=self.question_date, items=ordered)
+        return EvidencePack(
+            question=self.question,
+            question_date=self.question_date,
+            items=ordered,
+            question_type_hint=self.question_type_hint,
+        )
 
-    def to_prompt(self, max_chars_per_item: int = 1200) -> str:
-        """One line per item, whitespace-collapsed, prefixed with its date."""
+    def to_prompt(self, max_chars_per_item: int = 1500, max_total_chars: int = 24000) -> str:
+        """One line per item, whitespace-collapsed, prefixed with its date.
+
+        Compact, high-signal window: a small per-item cap keeps the total input
+        inside the reader's reliable attention range. v2's ~14KB compact input
+        answered correctly where the 59KB dump abstained (attention dilution —
+        see RUN_NOTES "reader budget"). Selected by relevance into the budget,
+        then presented chronologically (dates drive temporal reasoning)."""
+        top = sorted(self.items, key=lambda e: e.score, reverse=True)
+        lines: list[tuple[str, str]] = []
+        used = 0
+        for ev in top:
+            text = ev.text if len(ev.text) <= max_chars_per_item else ev.text[:max_chars_per_item] + "..."
+            text = " ".join(text.split())
+            used += len(text)
+            if used > max_total_chars and lines:
+                break
+            prefix = f"[{date_key(ev.date) or ev.date}] ({ev.source}, session {ev.session_id}) "
+            lines.append((date_key(ev.date) or ev.date, prefix + text))
+        lines.sort(key=lambda p: p[0])
+        return "\n".join(line for _, line in lines)
+
+    def gate_prompt(self, max_items: int = 12, max_chars_per_item: int = 8000) -> str:
+        """Projection for the sufficiency gate: top-scored items, same per-item
+        window as the reader's `to_prompt` (8000 chars).
+
+        Per-item truncation must match the reader view — a narrower window made
+        the gate abstain on answerable questions (gold statements sit deep in
+        long sessions; see RUN_NOTES "gate projection"). The gate audits exactly
+        what the reader would see."""
+        top = sorted(self.items, key=lambda e: e.score, reverse=True)[:max_items]
         lines = []
-        for ev in self.chronological().items:
-            text = " ".join(ev.text.split())
-            if len(text) > max_chars_per_item:
-                text = text[:max_chars_per_item] + "..."
+        for ev in top:
+            text = ev.text if len(ev.text) <= max_chars_per_item else ev.text[:max_chars_per_item] + "..."
+            text = " ".join(text.split())
             lines.append(f"[{date_key(ev.date) or ev.date}] ({ev.source}, session {ev.session_id}) {text}")
         return "\n".join(lines)
 
 
 class MemoryItem(BaseModel):
-    """HydraDB ingest item shape (see store/hydradb.py)."""
+    """HydraDB ingest item shape (see store/hydradb.py).
+
+    Note: the v2 server rejects string `metadata` (must be a map), so the wire
+    adapter builds plain dicts; this class documents the shape."""
 
     id: str
     title: str
     text: str | None = None
     user_assistant_pairs: list[dict[str, str]] | None = None
     infer: bool = True
-    metadata: str = "{}"
+    metadata: dict[str, Any] = Field(default_factory=dict)
     additional_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

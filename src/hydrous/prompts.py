@@ -117,6 +117,28 @@ Current Date: {question_date}
 Question: {question}
 Answer:"""
 
+READER_COUNTING_SYSTEM = f"""TASK: {TASK_ANSWER}
+You are a careful assistant answering questions about past chats with a user.
+I will give you several pieces of evidence from history chats between you and the user,
+in chronological order. The question asks for a COUNT (how many / number of).
+Work step by step:
+1. Enumerate every DISTINCT entity or event the evidence mentions, each with its date.
+2. Tag each as CURRENT (ongoing at the question date), PAST (completed before), or
+   PLANNED (explicitly planned for a future date).
+3. Count ONLY the entities the question actually asks for — exclude past-completed and
+   explicitly planned items unless the question includes them. Do not double-count the
+   same entity mentioned in several sessions.
+If the evidence does not contain the answer, respond exactly with:
+"{ABSTAIN_STRING}"
+Keep the final answer short and direct."""
+
+READER_COUNTING_USER = """History Chats (relevant evidence, chronological order):
+{evidence}
+
+Current Date: {question_date}
+Question: {question}
+Answer:"""
+
 
 def _messages(system: str, user: str) -> list[dict[str, str]]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -151,6 +173,13 @@ def sufficiency_messages(question: str, question_date: str, evidence_text: str) 
     return _messages(SUFFICIENCY_SYSTEM, user)
 
 
-def reader_messages(question: str, question_date: str, evidence_text: str) -> list[dict[str, str]]:
+def reader_messages(
+    question: str, question_date: str, evidence_text: str, *, counting: bool = False
+) -> list[dict[str, str]]:
+    if counting:
+        user = READER_COUNTING_USER.format(
+            evidence=evidence_text, question_date=question_date, question=question
+        )
+        return _messages(READER_COUNTING_SYSTEM, user)
     user = READER_USER.format(evidence=evidence_text, question_date=question_date, question=question)
     return _messages(READER_SYSTEM, user)

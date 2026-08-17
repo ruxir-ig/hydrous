@@ -32,12 +32,15 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-small-en-v1.5"
 
     hydra_db_api_key: str | None = None
+    hydra_db_base_url: str | None = None  # None -> SDK default (https://api.hydradb.com)
+    hydra_db_database: str = "hydrous"
 
     data_dir: Path = Path("data")
     store_path: Path = Path("data/hydrous.sqlite3")
     cache_dir: Path = Path("cache")
     max_concurrency: int = 8
     top_k: int = 12
+    use_gate: bool = True
     request_timeout: float = 60.0
     max_retries: int = 5
     log_level: str = "INFO"

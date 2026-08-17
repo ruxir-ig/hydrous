@@ -8,6 +8,7 @@ to abstain, and any "don't know"-style output is normalized to the exact string.
 from __future__ import annotations
 
 import logging
+import re
 
 from pydantic import BaseModel
 
@@ -19,6 +20,7 @@ from ..schema import ABSTAIN_STRING, EvidencePack
 log = logging.getLogger(__name__)
 
 _IDK_MARKERS = ("don't know", "do not know", "does not contain", "not contain this information")
+_COUNTING_RE = re.compile(r"\b(how many|number of|count|how much)\b", re.IGNORECASE)
 
 
 class AnswerResult(BaseModel):
@@ -53,13 +55,22 @@ class Answerer:
 
         if self._use_gate:
             verdict = await self._llm.chat(
-                prompts.sufficiency_messages(question, question_date, evidence_text)
+                prompts.sufficiency_messages(
+                    question, question_date, pack.gate_prompt()
+                ),
             )
             if "yes" not in verdict.lower():
                 log.info("question %s: evidence judged insufficient — abstaining", question_id)
                 return self._abstain_result(question_id, pack)
 
-        raw = (await self._llm.chat(prompts.reader_messages(question, question_date, evidence_text))).strip()
+        counting = pack.question_type_hint == "multi-session" and bool(_COUNTING_RE.search(question))
+        raw = (
+            await self._llm.chat(
+                prompts.reader_messages(
+                    question, question_date, evidence_text, counting=counting
+                ),
+            )
+        ).strip()
         if any(marker in raw.lower() for marker in _IDK_MARKERS):
             return self._abstain_result(question_id, pack)
         return AnswerResult(question_id=question_id, answer=raw, abstained=False, evidence=pack)

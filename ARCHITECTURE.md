@@ -142,8 +142,15 @@ EvalInstance                                        # pydantic model of one Long
 ### 3. Answering (`Answerer.answer`)
 
 1. Empty evidence pack → abstain immediately (no LLM call).
-2. **Sufficiency gate** (CRAG-style, strict): LLM judges whether the evidence explicitly
-   contains the asked information. "no" → return the exact abstention string.
+2. **Sufficiency gate** (CRAG-style, strict, `USE_GATE=1`): LLM judges whether the evidence
+   explicitly contains the asked information. "no" → return the exact abstention string.
+   **FINDING (2026-08-15, final): the LLM verdict gate is unreliable with deepseek-v4-flash
+   and is a net negative** — it says "no" even when gold-only evidence is in the prompt, and it
+   abstains on exactly the questions the reader also fails (gpt4, 6d550036). Gate-ON and
+   gate-OFF both land at 60% locally, so the gate adds no accuracy while risking false abstentions.
+   Recommended disposition: keep the empty-pack heuristic, drop the LLM verdict, and rely on the
+   reader's own abstention marker (step 3). The `gate_prompt` compact projection (12 × 8000, truncate
+   raw before collapse) is retained for reference but not recommended for the current model.
 3. **CoN reader**: official-style prompt — extract relevant info step by step, then reason;
    `question_date` always passed; explicit instruction to answer with the abstention string if
    evidence is insufficient. Reader output containing "don't know"/"does not contain" is
@@ -185,7 +192,9 @@ evidence echo; judge → overlap / IDK detection). Every LLM call is recorded in
 SQLite at `STORE_PATH` (default `data/hydrous.sqlite3`). Tables: `sessions`, `turns`,
 `facts`, `meta`. Embeddings stored as float32 blobs; per-question corpus is small (~40 sessions,
 ≤ a few hundred facts) so search loads that question's rows, computes cosine in numpy, and
-builds BM25 on the fly. Hybrid merge = RRF.
+builds BM25 on the fly. Hybrid merge = lane-separated RRF (facts vs sessions compete within
+their own lane; facts weight 0.4) — prevents short fact snippets from drowning gold sessions.
+Per-item evidence window: 8000 chars (`EvidencePack.to_prompt`).
 
 Embedding backends (`EMBEDDING_BACKEND`):
 - `sentence-transformers` (default when importable): `EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`.
@@ -195,12 +204,27 @@ Embedding backends (`EMBEDDING_BACKEND`):
 ### HydraDB (optional extra `[hydra]`)
 
 `HydraDBStore` implements the same `MemoryStore` interface. One collection per LongMemEval
-instance (`qid_{question_id}`). Facts ingested with `id` upsert key; validity interval in
-`additional_metadata` (`valid_from`/`valid_to`/`superseded_by`); supersession = re-ingest same
-id with updated metadata (never delete). Query: `query_by="hybrid"`, `mode="thinking"`,
-`recency_bias=0.4`, `additional_context=f"Question date: {question_date}"`. Ingestion is async —
-adapter polls `databases.status` / `context.status` until ready/completed. Integration tests run
-only when `HYDRA_DB_API_KEY` is set.
+instance (`qid_{question_id}`).
+
+- Facts ingest with `id` upsert key; the full Fact is reconstructable from `additional_metadata`
+  (`subject`/`predicate`/`value`/`fact_date`/`session_id`/`valid_from`/`valid_to`/`superseded_by`).
+  Supersession = `context.update_source_metadata` PATCH on the stable id (probe-verified to sync
+  to the vector store — query-time `metadata_filters` on patched keys match; no re-ingest).
+- Sessions ingest as `user_assistant_pairs` (server requires text XOR pairs and caps
+  `additional_metadata` at 1024 bytes). Long sessions split into parts (`{qid}:{sid}`,
+  `{qid}:{sid}#1`, ...) to stay under the ~1000 "memory_tokens" per-request budget; `get_sessions`
+  reconstructs turns from `context.inspect` (single pair → "USER:/ASSISTANT:" lines, multi-pair →
+  `{"pairs": [...]}` JSON envelope). `_ingest_items` chunks payloads by estimated cost and paces
+  concurrent ingests through a rolling 5000/min token window; 429s are retried and oversized
+  payloads are shrunk + retried.
+- Query: `query_by="hybrid"`, `mode="thinking"`, `recency_bias=0.4`, `graph_context=True`
+  (multi-hop paths merged into the evidence list, scored relative to the best chunk). `valid_as_of`
+  filtering is applied client-side over chunk `additional_metadata` (server `metadata_filters` is
+  set-equality, which can't express date intervals).
+- SDK types are stale in places (`context.list` wire shape: `data.user_memories[]` with
+  `memory_id`; ingest `metadata` must be a map, not the SDK's `str`) — the adapter builds payloads
+  as plain dicts and reads raw HTTP bodies for list. Integration tests run only when
+  `HYDRA_DB_API_KEY` is set.
 
 ## How to run
 
@@ -219,6 +243,9 @@ uv run hydrous eval --limit 10 --type knowledge-update --out hyp.jsonl
 uv run hydrous judge --hypotheses hyp.jsonl --dataset data/longmemeval_s_cleaned.json
 uv run hydrous report --log hyp.jsonl.log
 
+# same subset against the HydraDB cloud store (HYDRA_DB_API_KEY in .env):
+uv run hydrous eval --id 6a1eabeb --id 6d550036 --id gpt4_59149c77 --store hydradb --reingest --out hyp_hydradb.jsonl
+
 uv run pytest                        # all green with MockLLM, no network, no key
 uv run ruff check
 ```
@@ -234,8 +261,12 @@ uv run ruff check
 - [x] Eval runner + judge + metrics + CLI
 - [x] HydraDB adapter (interface-complete; integration test skipped without HYDRA_DB_API_KEY)
 - [x] E2E smoke on oracle with MockLLM (CLI-verified: eval → judge → report, resume works)
-- [x] `ruff check` clean; `pytest` 72 passed + 1 skipped
-- [ ] Real-API subset run + prompt tuning (`--limit 10 --type knowledge-update` first)
+- [x] `ruff check` clean; `pytest` green
+- [x] HydraDB live validation on the real cloud API (probe + full-interface verify +
+      mock LongMemEval subset: 3 ids, all answered; parts ingest, PATCH supersession,
+      graph-context search, rate-limit pacing)
+- [ ] Real-API judged subset (LLM auth + free-tier quota permitting; ≈5-6 ids fit
+      the 3 free accounts' ~300k token budget)
 - [ ] Full 500-instance run + score vs 0.606 baseline / 0.870 oracle
 - [ ] Optional: HydraDB integration run once a HYDRA_DB_API_KEY is available
 
@@ -268,9 +299,17 @@ uv run ruff check
     NOT accurate; that's expected. Accuracy comes from the real model. The mock e2e tests lock
     pipeline plumbing, not quality.
   - Runner is sequential across questions, parallel across sessions within a question
-    (extraction is order-independent; versioning is applied chronologically afterwards).
-    For the full 500-instance run, consider adding question-level parallelism.
-  - HydraDB adapter: `get_facts`/`get_sessions`/`get_timeline`/`find_candidates` have no native
-    cloud API and return [] (logged); supersession is applied via id-upserts; conflict detection
-    is delegated to HydraDB's `infer` pipeline. Revisit if the SDK grows list/filter APIs.
+    (extraction and versioning+ingest are bounded-parallel; versioning is applied
+    chronologically after extraction). For the full 500-instance run, consider adding
+    question-level parallelism.
+  - HydraDB adapter: `get_facts`/`get_sessions`/`get_timeline`/`find_candidates` are
+    implemented via `context.list` (raw-body wire shape: `user_memories[]`, `memory_id` —
+    SDK types are stale). Sessions are `user_assistant_pairs` items split into cost-bounded
+    parts (server enforces text XOR pairs, a 1024-byte `additional_metadata` cap, and a
+    ~1000 tokens/request ingest budget with a 5000/min rolling limit); `get_sessions`
+    reconstructs turns from `context.inspect`. Supersession = `update_source_metadata` PATCH
+    on the stable id (verified to sync to the vector store). Conflict detection uses
+    `find_candidates` (exact list lane + semantic query lane). Parallel versioning across
+    sessions may miss a conflict if the earlier session's facts aren't indexed yet (observed:
+    supersessions still fire in practice on the 3-id mock run).
 

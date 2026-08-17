@@ -96,6 +96,7 @@ class FactExtractor:
         self._cache = ExtractionCache(cache_dir)
         self._model = model_name
         self._sem = asyncio.Semaphore(max_concurrency)
+        self._ingest_sem = asyncio.Semaphore(max_concurrency)
         self._conflict_threshold = conflict_threshold
 
     @property
@@ -103,16 +104,19 @@ class FactExtractor:
         return self._store
 
     async def extract_session(self, question_id: str, session: Session) -> tuple[list[Fact], str]:
-        """Extract facts + summary for one session (cache-first)."""
+        """Extract facts + summary for one session (cache-first).
+
+        Concurrency is bounded by the caller (`_extract` holds `self._sem`);
+        never re-acquire the same semaphore here — nested acquisition deadlocks
+        (RUN_NOTES: "nested semaphore")."""
         cached = self._cache.load(question_id, session.session_id, self._model)
         if cached is not None:
             raw_facts, summary = cached
         else:
-            async with self._sem:
-                facts_resp, summary_resp = await asyncio.gather(
-                    self._llm.chat(prompts.extraction_messages(session)),
-                    self._llm.chat(prompts.summary_messages(session)),
-                )
+            facts_resp, summary_resp = await asyncio.gather(
+                self._llm.chat(prompts.extraction_messages(session)),
+                self._llm.chat(prompts.summary_messages(session)),
+            )
             raw_facts, summary = parse_json_array(facts_resp), summary_resp.strip()
             self._cache.save(question_id, session.session_id, self._model, raw_facts, summary)
         facts = [f for f in (self._build_fact(question_id, session, d) for d in raw_facts) if f]
@@ -145,14 +149,22 @@ class FactExtractor:
         if skip_if_ingested and await self._store.has_question(question_id):
             log.info("question %s already ingested — skipping", question_id)
             return
-        results = await asyncio.gather(
-            *[self.extract_session(question_id, s) for s in sessions]
-        )
-        for session, (facts, summary) in zip(sessions, results, strict=True):
+        async def _extract(session: Session):
+            async with self._sem:
+                return await self.extract_session(question_id, session)
+        results = await asyncio.gather(*[_extract(s) for s in sessions])
+        for session, (_facts, summary) in zip(sessions, results, strict=True):
             session.summary = summary
-            await self._apply_versioning(question_id, facts)
-            await self._store.add_session(question_id, session, facts=facts)
-            await self._store.add_facts(question_id, facts)
+
+        async def _process(session: Session, facts: list[Fact]) -> None:
+            async with self._ingest_sem:
+                await self._apply_versioning(question_id, facts)
+                await self._store.add_session(question_id, session, facts=facts)
+                await self._store.add_facts(question_id, facts)
+
+        # Sessions are versioned+ingested in bounded parallel: the dominant cost
+        # is server-side indexing, which pipelines across concurrent ingests.
+        await asyncio.gather(*(_process(s, f) for s, (f, _) in zip(sessions, results, strict=True)))
 
     async def _apply_versioning(self, question_id: str, new_facts: list[Fact]) -> None:
         """Close validity intervals of currently-valid facts contradicted by new ones."""
@@ -172,7 +184,7 @@ class FactExtractor:
                         prompts.conflict_messages(
                             cand.subject, cand.predicate, cand.value, cand.fact_date,
                             fact.value, fact.fact_date,
-                        )
+                        ),
                     )
                 if "yes" in verdict.lower():
                     cand.valid_to = fact.fact_date

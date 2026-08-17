@@ -56,6 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_sp  ON facts(question_id, subject, predicat
 """
 
 _RRF_K = 60
+_FACT_LANE_WEIGHT = 0.4
 
 
 def _norm_key(s: str) -> str:
@@ -228,10 +229,12 @@ class LocalMemoryStore(MemoryStore):
     ) -> list[Evidence]:
         candidates: list[Evidence] = []
         embs: list[np.ndarray] = []
+        lanes: list[list[int]] = [[], []]
         if include_facts:
             for fact, emb in self._load_facts(question_id):
                 if not include_superseded and not fact.valid_as_of(as_of_date):
                     continue
+                lanes[0].append(len(candidates))
                 candidates.append(
                     Evidence(
                         source="fact", text=fact.text, date=fact.fact_date,
@@ -241,6 +244,7 @@ class LocalMemoryStore(MemoryStore):
                 embs.append(emb)
         if include_sessions:
             for sid, date, text, _summary, emb in self._load_sessions(question_id):
+                lanes[1].append(len(candidates))
                 candidates.append(Evidence(source="session", text=text, date=date, session_id=sid))
                 embs.append(emb)
         if not candidates:
@@ -256,10 +260,18 @@ class LocalMemoryStore(MemoryStore):
         else:
             bm25_scores = np.zeros(len(candidates))
 
-        dense_ranks = _ranks(dense_scores)
-        bm25_ranks = _ranks(np.asarray(bm25_scores, dtype=np.float64))
-        for i, ev in enumerate(candidates):
-            ev.score = 1.0 / (_RRF_K + dense_ranks[i]) + 1.0 / (_RRF_K + bm25_ranks[i])
+        # Lane-separated RRF: facts compete against facts, sessions against
+        # sessions, so hundreds of short fact snippets cannot drown out long
+        # gold sessions (which lose token-overlap counts despite matching).
+        for idxs, weight in ((lanes[0], _FACT_LANE_WEIGHT), (lanes[1], 1.0)):
+            if not idxs:
+                continue
+            dense_ranks = _ranks(dense_scores[idxs])
+            bm25_ranks = _ranks(np.asarray(bm25_scores[idxs], dtype=np.float64))
+            for pos, i in enumerate(idxs):
+                candidates[i].score = weight * (
+                    1.0 / (_RRF_K + dense_ranks[pos]) + 1.0 / (_RRF_K + bm25_ranks[pos])
+                )
 
         candidates.sort(key=lambda e: e.score, reverse=True)
         return candidates[:top_k]

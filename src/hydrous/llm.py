@@ -14,6 +14,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import Protocol
 
+import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 from . import prompts
@@ -35,7 +36,16 @@ class LLMClient(Protocol):
 
 
 class OpenAICompatibleLLM:
-    """Async client for any OpenAI-compatible endpoint (OpenAI / OpenRouter / custom)."""
+    """Async client for any OpenAI-compatible endpoint (OpenAI / OpenRouter / custom).
+
+    Hardening notes (see RUN_NOTES "endpoint hangs"): the custom endpoint silently
+    swallows some requests under HTTP/2 multiplexing — the connection stays ESTAB
+    but the response never arrives and httpx's read timeout never fires. So every
+    call gets a hard wall-clock deadline via asyncio.wait_for (independent of httpx),
+    and every call runs on a brand-new httpx transport (HTTP/1.1, zero keep-alive):
+    fresh TLS connection per request, exactly mirroring the burst tests that never
+    hang. The AsyncOpenAI object is rebuilt per call too: long-lived clients have
+    shown to stall after a few requests in this pipeline."""
 
     def __init__(
         self,
@@ -47,7 +57,10 @@ class OpenAICompatibleLLM:
         max_retries: int = 5,
         client: AsyncOpenAI | None = None,
     ):
-        self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self._api_key = api_key
+        self._base_url = base_url
+        self._client = client
+        self._deadline = timeout
         self.model = model
         self.max_retries = max_retries
 
@@ -62,14 +75,16 @@ class OpenAICompatibleLLM:
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             try:
-                resp = await self._client.chat.completions.create(
-                    model=model or self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                resp = await asyncio.wait_for(
+                    self._call(
+                        model or self.model, messages, temperature, max_tokens
+                    ),
+                    timeout=self._deadline,
                 )
-                return resp.choices[0].message.content or ""
+                return resp
             except (RateLimitError, APIConnectionError, APITimeoutError) as e:
+                last_exc = e
+            except TimeoutError as e:
                 last_exc = e
             except APIStatusError as e:
                 last_exc = e
@@ -77,6 +92,41 @@ class OpenAICompatibleLLM:
                     raise
             await asyncio.sleep(min(2**attempt, 30) + random.random())
         raise RuntimeError(f"LLM call failed after {self.max_retries} attempts") from last_exc
+
+    async def _call(
+        self, model: str, messages: list[Message], temperature: float, max_tokens: int | None
+    ) -> str:
+        """One attempt on a brand-new transport: fresh client + fresh connection."""
+        if self._client is not None:
+            resp = await self._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content or ""
+        http_client = httpx.AsyncClient(
+            timeout=self._deadline + 15,
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=8),
+            http2=False,
+        )
+        client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=self._deadline + 5,
+            max_retries=0,
+            http_client=http_client,
+        )
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content or ""
+        finally:
+            await client.close()
 
 
 MockHandler = Callable[[str, str], str]

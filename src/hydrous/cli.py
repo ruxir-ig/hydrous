@@ -18,6 +18,7 @@ from .eval.runner import EvalRunner
 from .ingest.extractor import FactExtractor
 from .ingest.longmemeval import iter_instances, sessions_from_instance
 from .retrieve.pipeline import RetrievalPipeline
+from .store.base import MemoryStore
 from .store.local import LocalMemoryStore
 
 app = typer.Typer(
@@ -26,6 +27,32 @@ app = typer.Typer(
 
 ORACLE_URL = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json"
 S_CLEANED_URL = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"
+
+_ACCOUNT_MAP_PATH = Path("data/hydradb_accounts.json")
+
+
+def _check_hydradb_accounts(ids: list[str], api_key: str) -> None:
+    """Fail loudly if a qid's data lives on a different HydraDB account.
+
+    Per-account collections mean `has_question` is silently False on the wrong
+    account — which would trigger a fresh extraction+ingest (quota burn) instead
+    of an error. The map is data/hydradb_accounts.json: qid -> api-key prefix."""
+    import json
+
+    if not _ACCOUNT_MAP_PATH.exists():
+        return
+    try:
+        mapping = json.loads(_ACCOUNT_MAP_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    key_prefix = api_key[:20] if api_key else ""
+    for qid in ids:
+        owner = mapping.get(qid)
+        if owner and owner != key_prefix:
+            raise typer.Exit(
+                f"error: {qid} was ingested on account {owner!r} but the configured key is {key_prefix!r}. "
+                f"Set HYDRA_DB_API_KEY to the owning account (see data/hydradb_accounts.json)."
+            )
 
 
 def _setup_logging(settings: Settings) -> None:
@@ -42,21 +69,43 @@ def _llm(settings: Settings, *, mock: bool):
         raise typer.Exit(code=2) from e
 
 
-def _build_stack(settings: Settings, *, mock: bool, store_path: Path | None = None):
+def _build_store(
+    settings: Settings, *, mock: bool, store_backend: str, store_path: Path | None = None
+) -> MemoryStore:
+    """local = SQLite (+ embedder); hydradb = cloud adapter (needs HYDRA_DB_API_KEY)."""
+    if store_backend == "hydradb":
+        from .store.hydradb import HydraDBStore
+
+        if not settings.hydra_db_api_key:
+            typer.secho(
+                "error: --store hydradb requires HYDRA_DB_API_KEY in .env", fg=typer.colors.RED, err=True
+            )
+            raise typer.Exit(code=2)
+        return HydraDBStore(
+            settings.hydra_db_api_key,
+            database=settings.hydra_db_database,
+            base_url=settings.hydra_db_base_url,
+        )
+    if store_backend != "local":
+        raise typer.BadParameter(f"unknown store backend: {store_backend} (expected local|hydradb)")
+    embedder = build_embedder("tfidf") if mock else build_default_embedder(settings)
+    return LocalMemoryStore(store_path or settings.store_path, embedder)
+
+
+def _build_stack(settings: Settings, *, mock: bool, store: str = "local", store_path: Path | None = None):
     """Wire llm + store + extractor + retriever + answerer. --mock forces MockLLM + tfidf."""
     llm = _llm(settings, mock=mock)
-    embedder = build_embedder("tfidf") if mock else build_default_embedder(settings)
-    store = LocalMemoryStore(store_path or settings.store_path, embedder)
+    store_ = _build_store(settings, mock=mock, store_backend=store, store_path=store_path)
     extractor = FactExtractor(
         llm,
-        store,
+        store_,
         settings.cache_dir,
         model_name=("mock-model" if mock else settings.llm_model),
         max_concurrency=settings.max_concurrency,
     )
-    retriever = RetrievalPipeline(llm, store, top_k=settings.top_k)
-    answerer = Answerer(llm, retriever)
-    return llm, store, extractor, retriever, answerer
+    retriever = RetrievalPipeline(llm, store_, top_k=settings.top_k)
+    answerer = Answerer(llm, retriever, use_gate=settings.use_gate)
+    return llm, store_, extractor, retriever, answerer
 
 
 @app.command("download-data")
@@ -82,12 +131,15 @@ def ingest(
     qtype: list[str] = typer.Option([], "--type", help="Filter by question_type"),
     ids: list[str] = typer.Option([], "--id", help="Filter by question_id"),
     mock: bool = typer.Option(False, "--mock", help="Use MockLLM + tfidf (no API key)"),
+    store_backend: str = typer.Option("local", "--store", help="local | hydradb"),
     reingest: bool = typer.Option(False, "--reingest", help="Drop stored data per instance first"),
 ) -> None:
     """Ingest instances (extract facts + summaries, build the memory store)."""
     settings = Settings()
     _setup_logging(settings)
-    _, store, extractor, _, _ = _build_stack(settings, mock=mock)
+    if store_backend == "hydradb" and ids:
+        _check_hydradb_accounts(ids, settings.hydra_db_api_key)
+    _, store, extractor, _, _ = _build_stack(settings, mock=mock, store=store_backend)
 
     async def main() -> int:
         n = 0
@@ -113,12 +165,15 @@ def answer(
     question_id: str,
     dataset: Path = typer.Option(Path("data/longmemeval_s_cleaned.json"), help="Dataset JSON"),
     mock: bool = typer.Option(False, "--mock", help="Use MockLLM + tfidf (no API key)"),
+    store_backend: str = typer.Option("local", "--store", help="local | hydradb"),
     show_evidence: bool = typer.Option(False, "--evidence", help="Print the evidence pack"),
 ) -> None:
     """Answer one dataset instance's question (ingests it first if needed)."""
     settings = Settings()
     _setup_logging(settings)
-    _, store, extractor, _, answerer = _build_stack(settings, mock=mock)
+    if store_backend == "hydradb":
+        _check_hydradb_accounts([question_id], settings.hydra_db_api_key)
+    _, store, extractor, _, answerer = _build_stack(settings, mock=mock, store=store_backend)
 
     async def main() -> None:
         inst = next(iter(iter_instances(dataset, ids={question_id})), None)
@@ -144,12 +199,15 @@ def eval_cmd(
     ids: list[str] = typer.Option([], "--id", help="Filter by question_id"),
     exclude_abs: bool = typer.Option(False, "--exclude-abs", help="Skip _abs abstention items"),
     mock: bool = typer.Option(False, "--mock", help="Use MockLLM + tfidf (no API key)"),
+    store_backend: str = typer.Option("local", "--store", help="local | hydradb"),
     reingest: bool = typer.Option(False, "--reingest", help="Drop stored data per instance first"),
 ) -> None:
     """Run the full pipeline (ingest → retrieve → answer) and write hypotheses JSONL."""
     settings = Settings()
     _setup_logging(settings)
-    _, store, extractor, _, answerer = _build_stack(settings, mock=mock)
+    if store_backend == "hydradb" and ids:
+        _check_hydradb_accounts(ids, settings.hydra_db_api_key)
+    _, store, extractor, _, answerer = _build_stack(settings, mock=mock, store=store_backend)
     runner = EvalRunner(extractor, answerer)
 
     def progress(inst, result) -> None:
