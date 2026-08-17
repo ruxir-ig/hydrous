@@ -65,9 +65,19 @@ with Memory() as m:                     # local store; Memory(store="hydradb", .
                     filters={"user_id": "alice"}, top_k=3)
     # hits == {"results": [{"id": ..., "memory": ..., "score": ...}]}
     m.get_all(filters={"user_id": "alice"})      # {"results": [ ... ]}
+    m.get(memory_id)                             # {"id", "memory", "hash", ...} or None
+    m.history(memory_id)                         # full supersession chain (mem0 field names)
     m.update(memory_id, text="...")              # {"message": "Memory updated successfully!"}
     m.delete(memory_id)                          # {"message": "Memory deleted successfully!"}
 ```
+
+Ids resolve from a **persisted registry** (a JSON sidecar next to the store), so
+`get` / `history` / `update` / `delete` keep working after a process restart —
+exactly like mem0 resolving ids from storage. `history()` is the versioned
+showcase: for a fact it walks its slot's supersession chain in both directions,
+returning mem0-shaped `{memory_id, old_memory, new_memory, event, ...}` records
+(ADD per version, UPDATE pointing at the successor) — strictly richer than
+mem0's flat `previous_value`/`new_value` log.
 
 `add(..., infer=False)` stores raw messages with **no LLM call** — the cheap/fast
 path, exactly mem0's semantics (one memory per non-system message). `infer=True`
@@ -78,8 +88,16 @@ runs quality-gated extraction and stores only the extracted facts (mem0 parity).
 `show_expired`; `expiration_date` is stored in metadata but not yet enforced.
 `timestamp` raises, exactly like mem0 OSS. `search()`/`get_all()` also accept the
 legacy top-level `user_id=` form (mem0 1.1+ rejects it; accepted here with a log
-note for old code). Scores are rank-normalized to [0, 1] (RRF, not cosine);
-`explain=True` exposes the raw RRF via `score_details`.
+note for old code). Scores are rank-mapped to [0.1, 1.0] — best hit 1.0, lowest
+returned hit 0.1 — so the default `threshold=0.1` keeps every hit; the threshold
+is a relative tail-trimmer, not an absolute similarity floor (the engine uses
+RRF, not cosine). `explain=True` exposes the raw RRF via `score_details`.
+
+**Deletion semantics:** explicit `delete()` / `delete_all()` / `reset()` are
+honored as real hard deletes (user-initiated deletion is a privacy expectation).
+"Append-only" means supersession never *silently* deletes a fact when a newer one
+contradicts it — it closes the old fact's validity interval instead. You keep
+full control; the system never deletes behind your back.
 
 ## Four demos mem0 structurally cannot do
 

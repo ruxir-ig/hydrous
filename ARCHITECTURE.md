@@ -297,6 +297,34 @@ uv run ruff check
 
 (Append decisions + gotchas here as they happen; newest first.)
 
+- 2026-08-17 (Phase 2.1 patch — review closure on Phase 2): Decisions + gotchas:
+  - **`get(memory_id)` + `history(memory_id)` added** — mem0 parity shapes, verified
+    against mem0's source: `get` returns the item dict or **None** (does NOT raise);
+    `history` returns a **list** with mem0's history-table field names
+    (`memory_id / old_memory / new_memory / event / created_at / updated_at /
+    is_deleted / actor_id / role`), empty list when unknown. For facts, `history`
+    walks the slot's FULL supersession chain via `get_timeline` (both directions):
+    ADD per version + UPDATE pointing at the successor — strictly richer than
+    mem0's flat log. Raw sessions: single ADD.
+  - **Durable id resolution**: `_IdRegistry` JSON sidecar (atomic tmp+os.replace)
+    next to the store (`{store_path}.ids.json`; hydradb: `data/hydra_mem_ids.json`,
+    overridable via `ids_path=`). Every add/search/get_all/import records
+    id→scope (+ scope entity ids so `get()` can rebuild user_id/agent_id/run_id).
+    `delete`/`update`/`get`/`history` now resolve across process restarts; unknown
+    ids pop stale registry entries before raising. `reset()` wipes EVERY scope in
+    the registry (other instances' scopes included) — mem0 wipe-everything
+    semantics; `delete_all` uses `drop_scope` (returns removed ids so the
+    feedback-loop `_seen` map can be filtered).
+  - `Memory.close()` now releases the store (sqlite connection) ON its event-loop
+    thread before stopping the loop (`AsyncMemory.close()` + `_closed` flag) —
+    previously the sqlite conn leaked.
+  - **Search score floor**: min-max normalized to [0.1, 1.0] (single/uniform batch
+    → 1.0). Rationale: with [0, 1] mapping the lowest-ranked hit normalized to 0.0
+    and the DEFAULT threshold 0.1 always dropped it — a 2-result search returned 1.
+    Now the default keeps every hit (mem0's default rarely trims either); threshold
+    stays a relative tail-trimmer. Scores remain rank-based, not cosine.
+  - **README deletion framing**: explicit `delete`/`delete_all`/`reset` are real
+    hard deletes (privacy); "append-only" means supersession never SILENTLY deletes.
 - 2026-08-17: Phase 2 — competitor surface. Decisions + gotchas:
   - **mem0 contract target = v1.1+** (current `mem0/memory/main.py`): `search`/`get_all` scope
     via `filters={"user_id": ...}` and REJECT top-level entity kwargs; `add` keeps top-level

@@ -18,6 +18,7 @@ These tests run offline (MockLLM + tfidf) and pass with NO API key.
 """
 
 import json
+import sqlite3
 
 import pytest
 
@@ -287,6 +288,155 @@ def test_expiration_date_stored_in_metadata(mem):
     mem.add("ephemeral note", user_id="alice", infer=False, expiration_date="2020-12-31")
     meta = mem.get_all(filters={"user_id": "alice"})["results"][0]["metadata"]
     assert meta["expiration_date"] == "2020-12-31"
+
+
+# ------------------------------------------- get / history (Phase 2.1 patch)
+
+
+def test_get_returns_mem0_shape_and_none_for_unknown(mem):
+    mem.add("loves espresso", user_id="caf", infer=False)
+    mid = mem.get_all(filters={"user_id": "caf"})["results"][0]["id"]
+    item = mem.get(mid)
+    assert item["id"] == mid
+    assert item["memory"] == "loves espresso"
+    assert set(("hash", "created_at", "updated_at", "metadata", "user_id")) <= set(item)
+    assert item["user_id"] == "caf"
+    assert mem.get("nope") is None  # mem0 parity: get returns None, does not raise
+
+
+def test_history_add_record_for_raw_memory(mem):
+    mem.add("remember to water the plants", user_id="g", infer=False)
+    mid = mem.get_all(filters={"user_id": "g"})["results"][0]["id"]
+    history = mem.history(mid)
+    assert len(history) == 1
+    rec = history[0]
+    # exact mem0 history-table field names (old_memory/new_memory/memory_id/event)
+    assert set(("id", "memory_id", "old_memory", "new_memory", "event", "created_at",
+                "updated_at", "is_deleted")) <= set(rec)
+    assert rec["memory_id"] == mid
+    assert rec["event"] == "ADD"
+    assert rec["old_memory"] is None and rec["new_memory"] == "remember to water the plants"
+    assert mem.history("nope") == []  # unknown -> empty list (mem0 parity)
+
+
+def test_history_walks_supersession_chain(mem, tmp_path):
+    """history(fact_id) returns the full version chain of the fact's slot:
+    every version's ADD plus the supersession UPDATE — richer than mem0's flat
+    previous_value/new_value log."""
+    qid = _Scope(user_id="laptop").question_id
+    seeder = LocalMemoryStore(tmp_path / "mem.sqlite3", TfidfEmbedder())
+    run(seeder.delete_question(qid))
+    dell = Fact(
+        id="laptop_dell", question_id=qid, subject="user", predicate="uses_laptop",
+        value="Dell XPS 13", fact_date="2023-06-01", session_id="s1",
+        valid_from="2023-06-01", valid_to="2024-03-15", superseded_by="laptop_macbook",
+    )
+    macbook = Fact(
+        id="laptop_macbook", question_id=qid, subject="user", predicate="uses_laptop",
+        value="MacBook Pro", fact_date="2024-03-15", session_id="s2", valid_from="2024-03-15",
+    )
+    run(seeder.add_facts(qid, [dell, macbook]))
+    seeder.close()
+
+    # register ids (get_all sees superseded facts too; search would only see the current one)
+    mem.get_all(filters={"user_id": "laptop"})
+
+    history = mem.history("laptop_dell")
+    events = [(r["memory_id"], r["event"], r["old_memory"], r["new_memory"]) for r in history]
+    assert ("laptop_dell", "ADD", None, "user uses_laptop: Dell XPS 13") in events
+    assert ("laptop_dell", "UPDATE", "user uses_laptop: Dell XPS 13", "user uses_laptop: MacBook Pro") in events
+    assert ("laptop_macbook", "ADD", None, "user uses_laptop: MacBook Pro") in events
+    # chronological: Dell's ADD before the supersession UPDATE/MacBook's ADD
+    add_dell = next(i for i, r in enumerate(history) if r["event"] == "ADD" and r["memory_id"] == "laptop_dell")
+    assert add_dell < next(i for i, r in enumerate(history) if r["event"] == "UPDATE")
+
+
+# -------------------------------------------- durable id resolution (2.1)
+
+
+def test_ids_resolve_after_process_restart(tmp_path):
+    """delete()/update()/get() work on a fresh instance over the same store —
+    the id -> scope registry is persisted, like mem0 resolving ids from storage."""
+    db = tmp_path / "mem.sqlite3"
+    with Memory(store="local", store_path=str(db), llm=MockLLM(), embedder=TfidfEmbedder()) as m1:
+        m1.add("durable memory", user_id="alice", infer=False)
+        mid = m1.get_all(filters={"user_id": "alice"})["results"][0]["id"]
+    # registry sidecar persisted next to the sqlite
+    assert (str(db) + ".ids.json") in [str(p) for p in tmp_path.iterdir()]
+
+    with Memory(store="local", store_path=str(db), llm=MockLLM(), embedder=TfidfEmbedder()) as m2:
+        assert m2.get(mid)["memory"] == "durable memory"
+        assert m2.delete(mid) == {"message": "Memory deleted successfully!"}
+        with pytest.raises(ValueError, match="not found"):
+            m2.delete(mid)
+
+
+def test_reset_wipes_other_instances_scopes(tmp_path):
+    db = tmp_path / "mem.sqlite3"
+    with Memory(store="local", store_path=str(db), llm=MockLLM(), embedder=TfidfEmbedder()) as m1:
+        m1.add("alice data", user_id="alice", infer=False)
+    with Memory(store="local", store_path=str(db), llm=MockLLM(), embedder=TfidfEmbedder()) as m2:
+        m2.add("bob data", user_id="bob", infer=False)
+        m2.reset()  # wipe-everything semantics, including alice's persisted scope
+        assert m2.get_all(filters={"user_id": "bob"})["results"] == []
+        assert m2.get_all(filters={"user_id": "alice"})["results"] == []
+    with Memory(store="local", store_path=str(db), llm=MockLLM(), embedder=TfidfEmbedder()) as m3:
+        assert m3.get_all(filters={"user_id": "alice"})["results"] == []  # still gone
+
+
+def test_close_releases_store(tmp_path):
+    m = Memory(store="local", store_path=str(tmp_path / "c.sqlite3"), llm=MockLLM(), embedder=TfidfEmbedder())
+    m.add("x", user_id="u", infer=False)
+    conn = m._async._store._conn
+    m.close()
+    with pytest.raises(sqlite3.ProgrammingError):  # closed conn
+        conn.execute("SELECT 1")
+
+
+def test_delete_all_clears_registry(tmp_path):
+    db = tmp_path / "mem.sqlite3"
+    with Memory(store="local", store_path=str(db), llm=MockLLM(), embedder=TfidfEmbedder()) as m:
+        m.add("gone soon", user_id="alice", infer=False)
+        mid = m.get_all(filters={"user_id": "alice"})["results"][0]["id"]
+        m.delete_all(user_id="alice")
+        assert m.get(mid) is None  # registry entry dropped
+    with Memory(store="local", store_path=str(db), llm=MockLLM(), embedder=TfidfEmbedder()) as m2:
+        assert m2.get_all(filters={"user_id": "alice"})["results"] == []
+
+
+def test_search_keeps_all_hits_at_default_threshold(mem, tmp_path):
+    """Rank-mapped scores floor at 0.1, so the default threshold 0.1 keeps every
+    hit (a 2-result search returns 2); raising it trims the weak tail."""
+    qid = _Scope(user_id="lang").question_id
+    seeder = LocalMemoryStore(tmp_path / "mem.sqlite3", TfidfEmbedder())
+    run(seeder.delete_question(qid))
+    run(seeder.add_facts(qid, [
+        Fact(id="f_rust", question_id=qid, subject="user", predicate="likes_language",
+             value="Rust", fact_date="2023-01-01", session_id="s1", valid_from="2023-01-01"),
+        Fact(id="f_go", question_id=qid, subject="user", predicate="likes_language",
+             value="Go", fact_date="2023-02-01", session_id="s2", valid_from="2023-02-01"),
+    ]))
+    seeder.close()
+
+    res = mem.search("likes_language", filters={"user_id": "lang"})["results"]
+    assert {r["id"] for r in res} == {"f_rust", "f_go"}
+    scores = [r["score"] for r in res]
+    assert max(scores) == 1.0 and min(scores) == 0.1
+    assert len(mem.search("likes_language", filters={"user_id": "lang"}, threshold=0.5)["results"]) == 1
+
+
+def test_async_get_and_history(async_mem):
+    async def go():
+        await async_mem.add("prefers async apis", user_id="dev", infer=False)
+        all_items = (await async_mem.get_all(filters={"user_id": "dev"}))["results"]
+        mid = all_items[0]["id"]
+        assert (await async_mem.get(mid))["memory"] == "prefers async apis"
+        hist = await async_mem.history(mid)
+        assert hist and hist[0]["event"] == "ADD"
+        await async_mem.delete(mid)
+        assert await async_mem.get(mid) is None
+
+    run(go())
 
 
 # ------------------------------------------------------------ async surface

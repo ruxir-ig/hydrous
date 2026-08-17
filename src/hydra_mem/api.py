@@ -29,10 +29,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import os
 import re
 import threading
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -154,6 +157,91 @@ class _Scope:
         self.top_level_kwargs = {k: v for k, v in (kwargs or {}).items() if k not in _ENTITY_KEYS}
 
 
+class _IdRegistry:
+    """Persistent memory-id -> scope map (a JSON sidecar file).
+
+    mem0 resolves ids from storage, so `delete()`/`update()`/`get()`/`history()`
+    keep working across process restarts here too: every scope-bounded operation
+    records the ids it created/returned, persisted atomically on mutation, and
+    instances pointing at the same store share the file. Scope entity ids are
+    kept alongside so `get()` can reconstruct mem0's user_id/agent_id/run_id
+    item fields without a scope-building call.
+    """
+
+    def __init__(self, path: str | Path):
+        self._path = Path(path)
+        self._ids: dict[str, str] = {}
+        self._scopes: dict[str, dict[str, str]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        raw_ids = data.get("ids")
+        if isinstance(raw_ids, dict):
+            self._ids = {str(k): str(v) for k, v in raw_ids.items()}
+        raw_scopes = data.get("scopes")
+        if isinstance(raw_scopes, dict):
+            self._scopes = {str(k): v for k, v in raw_scopes.items() if isinstance(v, dict)}
+
+    def save(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps({"ids": self._ids, "scopes": self._scopes}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._path)
+        except OSError:
+            log.warning("failed to persist memory-id registry at %s", self._path, exc_info=True)
+
+    def set(self, memory_id: str, scope: str, entities: dict[str, str] | None = None) -> None:
+        changed = self._ids.get(memory_id) != scope
+        self._ids[memory_id] = scope
+        if entities:
+            if self._scopes.get(scope) != entities:
+                self._scopes[scope] = dict(entities)
+                changed = True
+        if changed:
+            self.save()
+
+    def get(self, memory_id: str) -> str | None:
+        return self._ids.get(memory_id)
+
+    def pop(self, memory_id: str) -> None:
+        if memory_id in self._ids:
+            del self._ids[memory_id]
+            self.save()
+
+    def drop_scope(self, scope: str) -> set[str]:
+        removed = {k for k, v in self._ids.items() if v == scope}
+        if not removed:
+            return set()
+        for k in removed:
+            del self._ids[k]
+        self._scopes.pop(scope, None)
+        self.save()
+        return removed
+
+    def scopes(self) -> set[str]:
+        return set(self._ids.values()) | set(self._scopes)
+
+    def entity_ids(self, scope: str) -> dict[str, str]:
+        return dict(self._scopes.get(scope) or {})
+
+    def clear(self) -> None:
+        if not self._ids and not self._scopes:
+            return
+        self._ids.clear()
+        self._scopes.clear()
+        self.save()
+
+
 # ---------------------------------------------------------------------------
 # AsyncMemory
 # ---------------------------------------------------------------------------
@@ -177,6 +265,7 @@ class AsyncMemory:
         quality_min_score: float | None = None,
         top_k: int = 20,
         use_gate: bool = False,
+        ids_path: str | None = None,
     ):
         self._store_backend = store
         self._store_path = store_path
@@ -197,9 +286,15 @@ class AsyncMemory:
         self._answerer: Answerer | None = None
         # feedback-loop prevention: content hash -> memory id ("tag" from search)
         self._seen: dict[str, str] = {}
-        # memory id -> scope bucket (delete/update resolve ids via this)
-        self._ids: dict[str, str] = {}
+        # memory id -> scope bucket, PERSISTED so update/delete/get/history work
+        # across process restarts (mem0 resolves ids from storage, not memory).
+        self._registry = _IdRegistry(ids_path or self._default_ids_path())
         self._scopes: set[str] = set()
+
+    def _default_ids_path(self) -> str:
+        if self._store_backend == "hydradb":
+            return str(self._settings.data_dir / "hydra_mem_ids.json")
+        return str(Path(self._store_path or self._settings.store_path)) + ".ids.json"
 
     # ------------------------------------------------------------- internals
 
@@ -261,8 +356,11 @@ class AsyncMemory:
             if value not in (None, False, {}, []):
                 log.info("%s: %r accepted — not implemented yet (fed back to hydrous)", name, value)
 
+    def _find_scope(self, memory_id: str) -> str | None:
+        return self._registry.get(memory_id)
+
     def _scope_of(self, memory_id: str) -> str:
-        qid = self._ids.get(memory_id)
+        qid = self._find_scope(memory_id)
         if qid is None:
             raise ValueError(f"Memory with id {memory_id} not found")
         return qid
@@ -321,7 +419,7 @@ class AsyncMemory:
                     metadata={**meta, "role": t.role},
                 )
                 await store.add_session(scope.question_id, session)
-                self._ids[session.session_id] = scope.question_id
+                self._registry.set(session.session_id, scope.question_id, scope.ids)
                 self._seen[h] = session.session_id
                 results.append(
                     {
@@ -383,7 +481,7 @@ class AsyncMemory:
         if fresh:
             await extractor.store_facts(scope.question_id, fresh, session=None)
             for f in fresh:
-                self._ids[f.id] = scope.question_id
+                self._registry.set(f.id, scope.question_id, scope.ids)
         return {"results": results}
 
     @staticmethod
@@ -463,8 +561,13 @@ class AsyncMemory:
         for ev, mem_id, text in ranked:
             if not mem_id:
                 continue
-            # min-max normalize to [0, 1]; a single/uniform batch is all "best"
-            norm = 1.0 if hi == lo else (ev.score - lo) / (hi - lo)
+            # Rank-map to [0.1, 1.0] (best hit = 1.0): with the default threshold
+            # 0.1 every returned hit survives — mem0's default rarely trims either.
+            # The LOWEST hit maps to 0.1 (not 0.0), so a 2-result search returns 2;
+            # raising the threshold trims the weak tail. min-max is RELATIVE, not a
+            # cosine similarity: scores are rank-normalized RRF, and explain=True
+            # exposes the raw RRF value in score_details.
+            norm = 1.0 if hi == lo else 0.1 + 0.9 * (ev.score - lo) / (hi - lo)
             if threshold and threshold > 0 and norm < threshold:
                 continue
             item: dict[str, Any] = {
@@ -480,7 +583,7 @@ class AsyncMemory:
             if explain:
                 item["score_details"] = {"rrf": float(ev.score)}
             self._seen[_content_hash(text)] = mem_id  # the feedback-loop tag
-            self._ids[mem_id] = scope.question_id
+            self._registry.set(mem_id, scope.question_id, scope.ids)
             out.append(item)
         return {"results": out}
 
@@ -531,7 +634,123 @@ class AsyncMemory:
                 }
             )
         items.sort(key=lambda i: str(i.get("created_at") or ""), reverse=True)
+        for item in items:  # refuse to lose track of ids -> delete/update work later
+            self._registry.set(item["id"], scope.question_id, scope.ids)
         return {"results": items[: max(int(top_k), 0)]}
+
+    # ------------------------------------------------------------ get
+
+    async def get(self, memory_id: str) -> dict | None:
+        """Retrieve one memory by id. mem0 parity: returns None for unknown ids
+        (delete/update are the ones that raise)."""
+        qid = self._find_scope(memory_id)
+        if qid is None:
+            return None
+        store = await self._ensure_store()
+        entities = self._registry.entity_ids(qid)
+        for f in await store.get_facts(qid):
+            if f.id == memory_id:
+                return {
+                    "id": f.id,
+                    "memory": f.text,
+                    "hash": _content_hash(f.text),
+                    "created_at": f.recorded_at,
+                    "updated_at": f.recorded_at,
+                    **entities,
+                    "metadata": {
+                        "kind": "fact",
+                        "subject": f.subject,
+                        "predicate": f.predicate,
+                        "value": f.value,
+                        "session_id": f.session_id,
+                        "quality_score": f.quality_score,
+                        "valid_from": f.valid_from,
+                        "valid_to": f.valid_to,
+                        "superseded_by": f.superseded_by,
+                    },
+                }
+        for s in await store.get_sessions(qid):
+            if s.session_id == memory_id:
+                return {
+                    "id": s.session_id,
+                    "memory": _strip_role_prefix(s.text),
+                    "hash": _content_hash(_strip_role_prefix(s.text)),
+                    "created_at": s.recorded_at,
+                    "updated_at": s.recorded_at,
+                    **entities,
+                    "metadata": {**s.metadata, "kind": "session"},
+                }
+        # registered but gone (deleted from another instance) — drop the stale entry
+        self._registry.pop(memory_id)
+        return None
+
+    @staticmethod
+    def _history_record(
+        memory_id: str,
+        old_memory: str | None,
+        new_memory: str | None,
+        event: str,
+        *,
+        created_at: str,
+        updated_at: str,
+    ) -> dict:
+        """One mem0 `history()` record — same field names as mem0's history table."""
+        return {
+            "id": uuid4().hex,
+            "memory_id": memory_id,
+            "old_memory": old_memory,
+            "new_memory": new_memory,
+            "event": event,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "is_deleted": False,
+            "actor_id": None,
+            "role": None,
+        }
+
+    async def history(self, memory_id: str) -> list[dict]:
+        """mem0 `history(memory_id)`: changes for a memory, newest-last (empty
+        list when unknown — mem0 parity). For facts this walks the FULL
+        supersession chain of the fact's (subject, predicate) slot in both
+        directions: every version gets an ADD record, every superseded version
+        an UPDATE record pointing at its successor — strictly richer than
+        mem0's flat previous_value/new_value log."""
+        qid = self._find_scope(memory_id)
+        if qid is None:
+            return []
+        store = await self._ensure_store()
+        sessions = {s.session_id: s for s in await store.get_sessions(qid)}
+        if memory_id in sessions:
+            sess = sessions[memory_id]
+            return [
+                self._history_record(
+                    memory_id, None, _strip_role_prefix(sess.text), "ADD",
+                    created_at=sess.recorded_at, updated_at=sess.recorded_at,
+                )
+            ]
+        fact = next((f for f in await store.get_facts(qid) if f.id == memory_id), None)
+        if fact is None:
+            return []
+        timeline = await store.get_timeline(qid, fact.subject, fact.predicate)
+        by_id = {f.id: f for f in timeline}
+        records = []
+        for ver in timeline:
+            records.append(
+                self._history_record(
+                    ver.id, None, ver.text, "ADD",
+                    created_at=ver.recorded_at, updated_at=ver.recorded_at,
+                )
+            )
+            succ = by_id.get(ver.superseded_by) if ver.superseded_by else None
+            if succ is not None:
+                records.append(
+                    self._history_record(
+                        ver.id, ver.text, succ.text, "UPDATE",
+                        created_at=succ.recorded_at, updated_at=succ.recorded_at,
+                    )
+                )
+        records.sort(key=lambda r: (str(r["created_at"] or ""), r["event"]))
+        return records
 
     # ------------------------------------------------------------ update
 
@@ -587,22 +806,25 @@ class AsyncMemory:
                     "updating an extracted fact is not supported yet — delete it and re-add "
                     "(bi-temporal supersession already handles 'replaced' facts)"
                 )
+        self._registry.pop(memory_id)  # stale entry: registered but no longer stored
         raise ValueError(f"Memory with id {memory_id} not found")
 
     # ------------------------------------------------------------ delete
 
     async def delete(self, memory_id: str) -> dict:
-        """Delete one memory by id; raises ValueError (mem0 parity) if unknown."""
+        """Delete one memory by id; raises ValueError (mem0 parity) if unknown.
+        NOTE: this is an EXPLICIT user-initiated delete and is honored as a hard
+        delete. Append-only only means supersession never SILENTLY deletes."""
         qid = self._scope_of(memory_id)
         store = await self._ensure_store()
         exists = any(f.id == memory_id for f in await store.get_facts(qid)) or any(
             s.session_id == memory_id for s in await store.get_sessions(qid)
         )
         if not exists:
-            self._ids.pop(memory_id, None)
+            self._registry.pop(memory_id)  # stale entry
             raise ValueError(f"Memory with id {memory_id} not found")
         await store.delete_memory(qid, memory_id)
-        self._ids.pop(memory_id, None)
+        self._registry.pop(memory_id)
         self._seen = {h: i for h, i in self._seen.items() if i != memory_id}
         return {"message": "Memory deleted successfully!"}
 
@@ -613,18 +835,20 @@ class AsyncMemory:
         scope = _Scope(user_id=user_id, agent_id=agent_id, run_id=run_id, what="delete_all")
         await (await self._ensure_store()).delete_question(scope.question_id)
         self._scopes.discard(scope.question_id)
-        self._seen = {h: i for h, i in self._seen.items() if self._ids.get(i) != scope.question_id}
-        self._ids = {i: s for i, s in self._ids.items() if s != scope.question_id}
+        removed = self._registry.drop_scope(scope.question_id)
+        self._seen = {h: i for h, i in self._seen.items() if i not in removed}
         return {"message": "Memories deleted successfully!"}
 
     async def reset(self) -> dict:
-        """Reset every scope this instance has touched (mem0 semantics: wipe all)."""
+        """Reset the whole store: every scope known to the persisted id registry
+        (including scopes tracked by other instances/processes), not just this
+        instance's — mem0's wipe-everything semantics."""
         store = await self._ensure_store()
-        scopes = self._scopes | set(self._ids.values())
+        scopes = self._scopes | self._registry.scopes()
         for qid in scopes:
             await store.delete_question(qid)
         self._seen.clear()
-        self._ids.clear()
+        self._registry.clear()
         self._scopes.clear()
         return {"message": "Memory reset successfully!"}
 
@@ -689,7 +913,7 @@ class AsyncMemory:
                     metadata={**meta, "role": "user"},
                 )
                 await store.add_session(scope.question_id, session)
-                self._ids[session.session_id] = scope.question_id
+                self._registry.set(session.session_id, scope.question_id, scope.ids)
                 self._seen[h] = session.session_id
                 self._scopes.add(scope.question_id)
                 stats["imported"] += 1
@@ -714,10 +938,19 @@ class AsyncMemory:
                 f.recorded_at = recorded  # created_at -> recorded_at
             await extractor.store_facts(scope.question_id, facts, session=None)
             for f in facts:
-                self._ids[f.id] = scope.question_id
+                self._registry.set(f.id, scope.question_id, scope.ids)
             self._scopes.add(scope.question_id)
             stats["imported"] += len(facts)
         return {"scopes": sorted(self._scopes), **stats}
+
+    async def close(self) -> None:
+        """Release the underlying store (sqlite connection / cloud client)."""
+        store, self._store = self._store, None
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                log.warning("hydra-mem store close failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +969,7 @@ class Memory:
 
     def __init__(self, **kwargs: Any):
         self._async = AsyncMemory(**kwargs)
+        self._closed = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, name="hydra-mem-loop", daemon=True)
         self._thread.start()
@@ -756,6 +990,12 @@ class Memory:
 
     def get_all(self, **kwargs: Any) -> dict:
         return self._run(self._async.get_all(**kwargs))
+
+    def get(self, memory_id: str) -> dict | None:
+        return self._run(self._async.get(memory_id))
+
+    def history(self, memory_id: str) -> list[dict]:
+        return self._run(self._async.history(memory_id))
 
     def update(self, memory_id: str, **kwargs: Any) -> dict:
         return self._run(self._async.update(memory_id, **kwargs))
@@ -778,8 +1018,13 @@ class Memory:
         return self._run(self._async.import_mem0(items, **kwargs))
 
     def close(self) -> None:
-        if not self._thread.is_alive():
+        if self._closed:
             return
+        self._closed = True
+        try:
+            self._run(self._async.close())  # release the store on its own loop
+        except Exception:
+            log.warning("hydra-mem close: async close failed", exc_info=True)
         try:
             self._loop.call_soon_threadsafe(self._loop.stop)
         except RuntimeError:
