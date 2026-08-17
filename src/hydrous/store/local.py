@@ -8,6 +8,7 @@ Dense and BM25 rankings are merged with reciprocal rank fusion (RRF, k=60).
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 from pathlib import Path
 
@@ -26,6 +27,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     date        TEXT NOT NULL,
     summary     TEXT,
     text        TEXT NOT NULL,
+    recorded_at TEXT,
+    metadata    TEXT,
     embedding   BLOB,
     PRIMARY KEY (question_id, session_id)
 );
@@ -49,11 +52,19 @@ CREATE TABLE IF NOT EXISTS facts (
     valid_to      TEXT,
     recorded_at   TEXT NOT NULL,
     superseded_by TEXT,
+    quality_score REAL,
     embedding     BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_facts_qid ON facts(question_id);
 CREATE INDEX IF NOT EXISTS idx_facts_sp  ON facts(question_id, subject, predicate);
 """
+
+# old sqlite files predate these columns (CREATE TABLE IF NOT EXISTS won't add them)
+_MIGRATIONS = (
+    "ALTER TABLE sessions ADD COLUMN recorded_at TEXT",
+    "ALTER TABLE sessions ADD COLUMN metadata TEXT",
+    "ALTER TABLE facts ADD COLUMN quality_score REAL",
+)
 
 _RRF_K = 60
 _FACT_LANE_WEIGHT = 0.4
@@ -80,6 +91,11 @@ class LocalMemoryStore(MemoryStore):
         self._conn.row_factory = sqlite3.Row
         self._embedder = embedder
         self._conn.executescript(_SCHEMA)
+        for stmt in _MIGRATIONS:  # tolerate already-migrated files ("duplicate column")
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         self._conn.commit()
 
     # ------------------------------------------------------------------ write
@@ -95,9 +111,13 @@ class LocalMemoryStore(MemoryStore):
             parts.extend(f.text for f in facts)
         emb = self._embedder.embed(["\n".join(parts)])[0]
         self._conn.execute(
-            "INSERT OR REPLACE INTO sessions (question_id, session_id, date, summary, text, embedding)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (question_id, session.session_id, session.date, session.summary, session.text, _to_blob(emb)),
+            "INSERT OR REPLACE INTO sessions"
+            " (question_id, session_id, date, summary, text, recorded_at, metadata, embedding)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                question_id, session.session_id, session.date, session.summary, session.text,
+                session.recorded_at, json.dumps(session.metadata, ensure_ascii=False), _to_blob(emb),
+            ),
         )
         self._conn.execute(
             "DELETE FROM turns WHERE question_id = ? AND session_id = ?", (question_id, session.session_id)
@@ -115,12 +135,13 @@ class LocalMemoryStore(MemoryStore):
         self._conn.executemany(
             "INSERT OR REPLACE INTO facts"
             " (id, question_id, subject, predicate, value, fact_date, session_id,"
-            "  valid_from, valid_to, recorded_at, superseded_by, embedding)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  valid_from, valid_to, recorded_at, superseded_by, quality_score, embedding)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     f.id, question_id, f.subject, f.predicate, f.value, f.fact_date, f.session_id,
-                    f.valid_from, f.valid_to, f.recorded_at, f.superseded_by, _to_blob(embs[i]),
+                    f.valid_from, f.valid_to, f.recorded_at, f.superseded_by, f.quality_score,
+                    _to_blob(embs[i]),
                 )
                 for i, f in enumerate(facts)
             ],
@@ -133,6 +154,23 @@ class LocalMemoryStore(MemoryStore):
             (fact.valid_to, fact.superseded_by, fact.id),
         )
         self._conn.commit()
+
+    async def delete_memory(self, question_id: str, memory_id: str) -> None:
+        """Delete one memory: a fact by id, else a session by session_id. No-op if unknown."""
+        cur = self._conn.execute(
+            "DELETE FROM facts WHERE question_id = ? AND id = ?", (question_id, memory_id)
+        )
+        if cur.rowcount:
+            self._conn.commit()
+            return
+        cur = self._conn.execute(
+            "DELETE FROM sessions WHERE question_id = ? AND session_id = ?", (question_id, memory_id)
+        )
+        if cur.rowcount:
+            self._conn.execute(
+                "DELETE FROM turns WHERE question_id = ? AND session_id = ?", (question_id, memory_id)
+            )
+            self._conn.commit()
 
     # ------------------------------------------------------------------ read
 
@@ -147,17 +185,26 @@ class LocalMemoryStore(MemoryStore):
                 predicate=r["predicate"], value=r["value"], fact_date=r["fact_date"],
                 session_id=r["session_id"], valid_from=r["valid_from"], valid_to=r["valid_to"],
                 recorded_at=r["recorded_at"], superseded_by=r["superseded_by"],
+                quality_score=r["quality_score"],
             )
             out.append((fact, _from_blob(r["embedding"])))
         return out
 
-    def _load_sessions(self, question_id: str) -> list[tuple[str, str, str, str | None, np.ndarray]]:
+    def _load_sessions(
+        self, question_id: str
+    ) -> list[tuple[str, str, str, str | None, str, dict, np.ndarray]]:
         rows = self._conn.execute(
-            "SELECT session_id, date, text, summary, embedding FROM sessions WHERE question_id = ?",
+            "SELECT session_id, date, text, summary, recorded_at, metadata, embedding"
+            " FROM sessions WHERE question_id = ?",
             (question_id,),
         ).fetchall()
         return [
-            (r["session_id"], r["date"], r["text"], r["summary"], _from_blob(r["embedding"]))
+            (
+                r["session_id"], r["date"], r["text"], r["summary"],
+                r["recorded_at"] or r["date"],  # legacy rows: fall back to session date
+                json.loads(r["metadata"]) if r["metadata"] else {},
+                _from_blob(r["embedding"]),
+            )
             for r in rows
         ]
 
@@ -166,7 +213,7 @@ class LocalMemoryStore(MemoryStore):
 
     async def get_sessions(self, question_id: str) -> list[Session]:
         sessions = []
-        for sid, date, _text, summary, _emb in self._load_sessions(question_id):
+        for sid, date, _text, summary, recorded_at, meta, _emb in self._load_sessions(question_id):
             rows = self._conn.execute(
                 "SELECT role, content FROM turns WHERE question_id = ? AND session_id = ? ORDER BY idx",
                 (question_id, sid),
@@ -174,6 +221,7 @@ class LocalMemoryStore(MemoryStore):
             sessions.append(
                 Session(
                     session_id=sid, date=date, summary=summary,
+                    recorded_at=recorded_at, metadata=meta,
                     turns=[Turn(role=r["role"], content=r["content"]) for r in rows],
                 )
             )
@@ -243,7 +291,7 @@ class LocalMemoryStore(MemoryStore):
                 )
                 embs.append(emb)
         if include_sessions:
-            for sid, date, text, _summary, emb in self._load_sessions(question_id):
+            for sid, date, text, _summary, _recorded_at, _meta, emb in self._load_sessions(question_id):
                 lanes[1].append(len(candidates))
                 candidates.append(Evidence(source="session", text=text, date=date, session_id=sid))
                 embs.append(emb)

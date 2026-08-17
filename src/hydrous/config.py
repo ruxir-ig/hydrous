@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     max_concurrency: int = 8
     top_k: int = 12
     use_gate: bool = True
+    # Extraction quality gate: facts with LLM confidence below this are dropped
+    # before storage (junk-extraction fix). 0 disables the gate.
+    quality_min_score: float = 0.4
     request_timeout: float = 60.0
     max_retries: int = 5
     log_level: str = "INFO"

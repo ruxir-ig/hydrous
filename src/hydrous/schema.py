@@ -26,6 +26,11 @@ class Session(BaseModel):
     date: str
     turns: list[Turn]
     summary: str | None = None
+    # Transaction time: when this session entered memory (vs `date` = when it
+    # happened). import-mem0 replays a mem0 export with created_at -> recorded_at.
+    recorded_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    # Free-form user metadata (mem0-compat: add(metadata={"category": ...})).
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -46,6 +51,9 @@ class Fact(BaseModel):
     valid_to: str | None = None
     recorded_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     superseded_by: str | None = None
+    # Extraction quality gate (0..1, from the LLM's confidence). None = legacy/
+    # unscored fact (kept, not gated). Stored in metadata so it survives storage.
+    quality_score: float | None = None
 
     @property
     def text(self) -> str:

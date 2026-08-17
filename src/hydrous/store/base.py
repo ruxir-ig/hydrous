@@ -23,6 +23,10 @@ class MemoryStore(ABC):
         """Persist validity-interval changes (valid_to / superseded_by). Never deletes."""
 
     @abstractmethod
+    async def delete_memory(self, question_id: str, memory_id: str) -> None:
+        """Delete ONE memory by its id (fact id or session_id). Unknown id is a no-op."""
+
+    @abstractmethod
     async def search(
         self,
         question_id: str,

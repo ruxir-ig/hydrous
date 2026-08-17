@@ -47,6 +47,7 @@ def test_mock_extraction_handler():
             "predicate": "my_favorite_color",
             "value": "My favorite color is blue.",
             "fact_date": "2023/05/01 (Mon) 10:00",
+            "confidence": 1.0,
         }
     ]
 

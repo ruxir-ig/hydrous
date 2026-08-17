@@ -72,9 +72,9 @@ Answer questions over chat histories spanning 30–40 sessions / ~115K tokens pe
 | `llm.py` | `LLMClient` protocol, `OpenAICompatibleLLM` (async, retry/backoff), `MockLLM` (scripted FIFO + deterministic heuristic handler) |
 | `embeddings.py` | `Embedder` protocol, `SentenceTransformerEmbedder` (lazy), `TfidfEmbedder` (pure-numpy hashing, stateless, default fallback) |
 | `ingest/longmemeval.py` | streaming JSON-array loader (`iter_instances`), `sessions_from_instance` (strips `has_answer`, sorts by date) |
-| `ingest/extractor.py` | `FactExtractor`: LLM fact extraction + summary per session, disk cache, supersession resolution |
-| `store/base.py` | `MemoryStore` ABC |
-| `store/local.py` | `LocalMemoryStore`: SQLite + dense embeddings + BM25 hybrid (RRF), temporal filtering |
+| `ingest/extractor.py` | `FactExtractor`: LLM fact extraction + summary per session, disk cache, supersession resolution, **quality gate** (scored facts, REJECT before storage), prompt-versioned cache |
+| `store/base.py` | `MemoryStore` ABC (incl. `delete_memory` for the compat layer) |
+| `store/local.py` | `LocalMemoryStore`: SQLite + dense embeddings + BM25 hybrid (RRF), temporal filtering; `recorded_at`/`metadata` on sessions, `quality_score` on facts |
 | `store/hydradb.py` | `HydraDBStore`: cloud adapter, same interface (import-guarded) |
 | `retrieve/pipeline.py` | `RetrievalPipeline`: query analysis → hybrid search → as-of filter → chronological `EvidencePack` |
 | `answer/reader.py` | `Answerer`: sufficiency gate → CoN reader → answer or exact abstention string |
@@ -83,11 +83,21 @@ Answer questions over chat histories spanning 30–40 sessions / ~115K tokens pe
 | `eval/metrics.py` | overall + per-`question_type` + abstention-subset accuracy table |
 | `cli.py` | typer CLI: `download-data` / `ingest` / `answer` / `eval` / `judge` / `report` |
 
+## Phase 2 surface (`src/hydra_mem/`)
+
+| Module | Responsibility |
+|---|---|
+| `api.py` | mem0-compatible `Memory` / `AsyncMemory` (mem0 v1.1+ contract): `add` (raw `infer=False` path / quality-gated facts), `search` (hybrid + `reference_date` as-of), `get_all`, `update`, `delete`, `delete_all`, `reset`, `chat` (reader + exact abstention), `import_mem0`. Accept-and-log: `rerank`, `categories`, metadata filters, `memory_type`, `prompt`, `expiration_date` (stored, not enforced), `show_expired`. Feedback-loop: search results tagged by content hash → re-`add` is a `NOOP`. Entity scopes map to `mem0_u_<id>` store buckets; a background event-loop thread owns the store for the sync facade. |
+| `importer.py` | `load_mem0_export`: validates the `get_all` export file shape |
+| `cli.py` | `hydra-mem` typer CLI: `add` / `search` / `get-all` / `import-mem0` / `demo` (the four positioning demos) |
+
 ## Data schemas
 
 ```python
 Turn(role: str, content: str)                      # has_answer NEVER stored
-Session(session_id, date, turns, summary=None)     # date as dataset string; normalized on compare
+Session(session_id, date, turns, summary=None,
+        recorded_at=None,   # transaction time (import-mem0: mem0 created_at)
+        metadata={})        # free-form user metadata (mem0 add(metadata=...))
 
 Fact(                                               # bi-temporal, append-only
     id, question_id, subject, predicate, value,
@@ -97,6 +107,7 @@ Fact(                                               # bi-temporal, append-only
     valid_to: None,       # None = currently valid; set when superseded
     recorded_at,          # wall-clock ingestion time (system time)
     superseded_by: None,  # id of the fact that replaced this one
+    quality_score: None,  # extraction confidence 0..1 from the quality gate
 )
 Fact.text == f"{subject} {predicate}: {value}"      # what gets embedded/indexed
 Fact.valid_as_of(date) == valid_from <= date < valid_to (or valid_to is None)
@@ -116,8 +127,11 @@ EvalInstance                                        # pydantic model of one Long
 1. Sessions sorted chronologically (dataset S is already sorted; we sort defensively).
 2. Extraction is **order-independent**, so all sessions are extracted concurrently
    (semaphore = `MAX_CONCURRENCY`, default 8): per session, LLM → JSON array of
-   `{subject, predicate, value, fact_date}` + a 2–3 sentence summary. Results cached at
-   `cache/extractions/{qid}__{sid}.json` (invalidated on model change) — reruns are free.
+   `{subject, predicate, value, fact_date, confidence}` + a 2–3 sentence summary. The
+   **quality gate** (Phase 2) drops facts below `QUALITY_MIN_SCORE` (default 0.4) or
+   explicitly flagged `reject`; the score is stored as `Fact.quality_score`. Results
+   cached at `cache/extractions/{qid}__{sid}.json` (invalidated on model OR
+   extraction-prompt-version change) — reruns are free.
 3. **Versioning is order-dependent**, so after extraction, sessions are applied sequentially in
    date order: `add_session` (raw turns + summary) → for each new fact, find candidate conflicts
    among *currently valid* facts: same normalized `(subject, predicate)`, or same subject with
@@ -267,13 +281,65 @@ uv run ruff check
       graph-context search, rate-limit pacing)
 - [ ] Real-API judged subset (LLM auth + free-tier quota permitting; ≈5-6 ids fit
       the 3 free accounts' ~300k token budget)
+- [x] Phase 2 — mem0-compat `Memory`/`AsyncMemory` (`src/hydra_mem/api.py`) with contract
+      tests lifted from mem0's own README examples + v1.1+ signatures; accept-and-log
+      (`rerank`, `categories`, metadata filters, `memory_type`, `prompt`, `expiration_date`)
+- [x] Phase 2 — extraction quality gate (scored facts via negative few-shots in
+      `EXTRACTION_SYSTEM` v2, REJECT path, `quality_score` kept in metadata, prompt-versioned cache)
+- [x] Phase 2 — feedback-loop prevention (search results tagged by content hash; re-`add` = NOOP;
+      sha1 fact ids dedupe exact re-extraction)
+- [x] Phase 2 — `hydra-mem import-mem0` (mem0 `get_all` export replay, `created_at → recorded_at`)
+- [x] Phase 2 — README positioning: four "mem0 cannot do" demos (`hydra-mem demo`), AGPL-vs-Apache
+      license flag; LICENSE (AGPL-3.0) added
 - [ ] Full 500-instance run + score vs 0.606 baseline / 0.870 oracle
-- [ ] Optional: HydraDB integration run once a HYDRA_DB_API_KEY is available
 
 ## Handoff notes for agents
 
 (Append decisions + gotchas here as they happen; newest first.)
 
+- 2026-08-17: Phase 2 — competitor surface. Decisions + gotchas:
+  - **mem0 contract target = v1.1+** (current `mem0/memory/main.py`): `search`/`get_all` scope
+    via `filters={"user_id": ...}` and REJECT top-level entity kwargs; `add` keeps top-level
+    `user_id=...`; `reference_date` raises "platform-only" in mem0 OSS. We implement
+    `reference_date` as as-of time travel (killer demo); we also ACCEPT the legacy top-level
+    `user_id=` in `search`/`get_all` (logged) so pre-1.1 code keeps working.
+  - **Compat scope mapping**: mem0 entities → sanitized store bucket
+    `mem0_u_<user_id>_a_<agent_id>...` (one HydraDB collection / sqlite question_id per scope).
+    Memory ids resolve within the process that created/searched them (`AsyncMemory._ids`);
+    `delete()`/`update()` raise mem0's exact "Memory with id ... not found" otherwise.
+  - **infer=True parity**: mem0 stores ONLY extracted memories (no raw conversation) — same here;
+    quality-gated facts, `store_facts(..., session=None)`. `infer=False`: one raw session per
+    non-system message (mem0's raw path), no LLM call at all.
+  - **Feedback loop**: `_seen` content-hash → id, tagged on every search result; re-add of that
+    content returns `event: "NOOP"` with the original id. Cross-process raw dedupe is NOT
+    implemented (mem0 doesn't dedupe raw either); fact dedupe is durable via (s,p,v) check
+    against `get_facts`. sha1 fact ids dedupe exact same-session re-extraction at the eval layer.
+  - **Scores**: hydrous uses RRF, not cosine. Compat `search` min-max-normalizes to [0,1]
+    (single-result batch → 1.0; threshold is a relative floor) and exposes the raw RRF in
+    `score_details` when `explain=True`. Never emit np.float64 in results (not JSON-serializable).
+  - **Sync facade**: `Memory` runs a single daemon event-loop thread (`asyncio.run_coroutine_threadsafe`);
+    the store/LLM are created lazily INSIDE that loop (sqlite conns + AsyncHydraDB clients are
+    loop-bound; creating them on the caller thread breaks sqlite's check_same_thread). Use
+    `with Memory(...) as m` / `m.close()`.
+  - **Quality gate**: `EXTRACTION_SYSTEM` v2 adds `confidence` + REJECT few-shots; changes are
+    automatically cache-invalidated via `EXTRACTION_PROMPT_VERSION` (cache payload carries it).
+    Old cached extractions without a version are misses → re-extract. `Fact.quality_score`,
+    `Session.recorded_at`/`Session.metadata` added to schema + local sqlite
+    (`ALTER TABLE` migrations; legacy rows fall back recorded_at → date) + HydraDB
+    `additional_metadata` (respect 1024B cap: truncate `meta` to ≤700 chars, keep `recorded_at`
+    on part 0).
+  - **Accepted-but-ignored params** (log, never crash): `rerank`, `categories`, non-entity
+    metadata filters, `memory_type`, `prompt`, `show_expired`; `expiration_date` is stored in
+    metadata but NOT enforced yet; `timestamp` raises like mem0. `update()` on an EXTRACTED fact
+    raises NotImplementedError (delete + re-add; supersession covers replacement).
+  - **import-mem0**: raw replay by default (no LLM), `created_at → recorded_at`, scope per item's
+    user_id/agent_id/run_id else `--user-id`; idempotent re-import via the feedback-loop hash.
+  - **License**: added LICENSE (AGPL-3.0, SPDX canonical text). mem0 OSS is Apache-2.0 — README
+    flags the copyleft difference for anyone vendoring as a drop-in.
+  - **Demo determinism trap**: seeding the `hydra-mem demo` store bypasses the LLM (direct
+    `Fact` writes with explicit valid intervals) so demos 1–3 are deterministic offline; the
+    mock reader is word-overlap-based so "before"-style answers need `--real`. `store_facts`,
+    `delete_question` etc. are async — any sync demo code must `asyncio.run(...)` them.
 - 2026-08-14: Initial build complete, all tests green. Decisions + gotchas:
   - **Python 3.14 works**: torch 2.13.0 (CPU wheel index) + sentence-transformers 5.7.0 install
     and run cleanly on 3.14.6. `.python-version` pins 3.14 so uv doesn't pick a managed 3.11.
@@ -288,8 +354,8 @@ uv run ruff check
     no pytest-asyncio dependency.
   - Prompts centralized in `prompts.py` with `TASK:` marker lines; `MockLLM` dispatches on them.
     If you add a prompt, add a marker AND a mock handler branch, or tests will break.
-  - Extraction cache (`cache/extractions/{qid}__{sid}.json`) is invalidated on MODEL change only.
-    If you edit the extraction PROMPT, delete `cache/` manually to re-extract.
+  - Extraction cache (`cache/extractions/{qid}__{sid}.json`) is invalidated on MODEL or
+    extraction-prompt-version change (Phase 2) — prompt edits re-extract automatically.
   - Fact ids are deterministic (sha1 of content) so cache reloads reproduce identical facts.
   - Changing `EMBEDDING_BACKEND`/`EMBEDDING_MODEL` on an existing store breaks (embedding dim
     mismatch) — delete `data/hydrous.sqlite3` when switching.

@@ -19,13 +19,14 @@ hydra = ["hydradb-sdk>=2,<3"]
 
 [project.scripts]
 hydrous = "hydrous.cli:app"
+hydra-mem = "hydra_mem.cli:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hydrous"]
+packages = ["src/hydrous", "src/hydra_mem"]
 
 [dependency-groups]
 dev = [
@@ -60,4 +61,5 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]
 "src/hydrous/cli.py" = ["B008"]        # typer.Option(...) defaults are the typer idiom
+"src/hydra_mem/cli.py" = ["B008"]      # typer.Option(...) defaults are the typer idiom
 "src/hydrous/eval/judge.py" = ["E501"] # official judge prompts are verbatim single-line strings

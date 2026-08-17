@@ -1,17 +1,165 @@
 # Hydrous
 
-Agent memory layer for cross-session continuity.
+**Agent memory layer for cross-session continuity — with a mem0-compatible API
+that is contract-tested as a drop-in, plus the temporal machinery mem0's OSS
+structurally cannot do.**
 
-**Read [ARCHITECTURE.md](ARCHITECTURE.md) — it is the single living doc**: problem, design,
-algorithms, eval protocol, how to run, current status, and handoff notes.
+Hydrous stores *bi-temporal, versioned facts* (not flat strings): every memory
+has a validity interval, superseded versions stay retrievable, and retrieval
+can answer "what was true back then" instead of only "what is true now". It runs
+on a local SQLite store or the HydraDB cloud adapter, and exposes itself in two
+ways:
+
+```python
+from hydra_mem import Memory          # mem0 drop-in (see below)
+
+m = Memory()                          # or Memory(store="hydradb", ...)
+m.add("I use a Dell XPS 13", user_id="alice", infer=False)
+```
+
+**Read [ARCHITECTURE.md](ARCHITECTURE.md) — it is the single living doc**: problem,
+design, algorithms, eval protocol, current status, and handoff notes.
+
+---
+
+## The pitch: where mem0 breaks, what Hydrous does instead
+
+| mem0 OSS | Hydrous |
+| --- | --- |
+| Flat strings; a newer fact is a *new* row, the old one is still searched as current | Bi-temporal facts; supersession closes `valid_to` (PATCH, stable id); old versions stay retrievable on demand |
+| Known junk-extraction problem ("98% junk", mem0 issue #4573) | Extraction **quality gate**: every fact is scored (`confidence`), junk is REJECTed before storage, the score is kept in metadata |
+| Re-adding search results duplicates memory | **Feedback-loop prevention**: anything `search()` returns is tagged, re-`add` is a no-op (`event: "NOOP"`); deterministic sha1 fact ids dedupe exact re-extraction |
+| `search(reference_date=...)` raises "platform-only" | `reference_date` **works**: true as-of time-travel over validated intervals |
+| No answering at all (`chat()` raises `NotImplementedError`) | `chat()` retrieves + reads, and **abstains with the exact string** when evidence is missing — no hallucination |
+| No multi-hop | HydraDB `graph_context` lanes merged into evidence (scored path contexts); nothing equivalent in mem0 |
+| No migration path | `hydra-mem import-mem0` replays a `get_all` export preserving `created_at → recorded_at` |
+
+---
 
 ## Quickstart
 
 ```bash
 uv sync
-cp .env.example .env   # add your API key
+cp .env.example .env           # add your LLM API key (or use MockLLM / --mock)
 uv run hydrous download-data
-uv run hydrous eval --limit 10          # real run (needs API key in .env)
-uv run hydrous eval --limit 10 --mock   # deterministic dry-run, no key needed
-uv run pytest                             # all tests pass with no API key
+uv run hydrous eval --limit 10          # real LongMemEval run
+uv run hydrous eval --limit 10 --mock   # deterministic dry run, no key needed
+uv run pytest                            # all tests pass with no API key
 ```
+
+### mem0 drop-in usage
+
+Phase 2 ships `src/hydra_mem/api.py` — `Memory` / `AsyncMemory` with mem0's exact
+surface (`add` / `search` / `get_all` / `update` / `delete` / `delete_all` /
+`reset`), the same result shapes (`{"results": [...]}`, `{"message": ...}`), and
+the same validation errors. The contract tests in `tests/test_mem0_compat.py`
+are lifted from mem0's own README examples and v1.1+ docstrings — "drop-in" is a
+tested claim:
+
+```python
+from hydra_mem import Memory
+
+with Memory() as m:                     # local store; Memory(store="hydradb", ...) for cloud
+    m.add("I am planning to go to the market tomorrow", user_id="alice")
+    hits = m.search("what is alice planning to do tomorrow?",
+                    filters={"user_id": "alice"}, top_k=3)
+    # hits == {"results": [{"id": ..., "memory": ..., "score": ...}]}
+    m.get_all(filters={"user_id": "alice"})      # {"results": [ ... ]}
+    m.update(memory_id, text="...")              # {"message": "Memory updated successfully!"}
+    m.delete(memory_id)                          # {"message": "Memory deleted successfully!"}
+```
+
+`add(..., infer=False)` stores raw messages with **no LLM call** — the cheap/fast
+path, exactly mem0's semantics (one memory per non-system message). `infer=True`
+runs quality-gated extraction and stores only the extracted facts (mem0 parity).
+
+**Params we accept but don't implement yet** (accepted-and-logged, never crash):
+`rerank`, `categories`, non-entity metadata filters, `memory_type`, `prompt`,
+`show_expired`; `expiration_date` is stored in metadata but not yet enforced.
+`timestamp` raises, exactly like mem0 OSS. `search()`/`get_all()` also accept the
+legacy top-level `user_id=` form (mem0 1.1+ rejects it; accepted here with a log
+note for old code). Scores are rank-normalized to [0, 1] (RRF, not cosine);
+`explain=True` exposes the raw RRF via `score_details`.
+
+## Four demos mem0 structurally cannot do
+
+`uv run hydra-mem demo` runs all four offline (MockLLM + SQLite); `--real` uses
+your configured LLM for the chat answers.
+
+**1. "What laptop did I use *before* the MacBook?" — answered from superseded facts.**
+A fact is never deleted: supersession closes its validity interval, and
+"previously / before / used to" questions retrieve the old version.
+
+```python
+m.add("I use a Dell XPS 13", user_id="alice")
+m.add("I switched to a MacBook Pro in March 2024", user_id="alice")
+m.chat("what laptop did I use before the MacBook?", filters={"user_id": "alice"})
+# real LLM -> "Dell XPS 13"  (the superseded fact is still retrievable)
+```
+
+**2. `as_of="2024-01-01"` time-travel.** mem0 OSS raises `ValueError` on
+`reference_date`; here it is real as-of filtering over validated intervals:
+
+```python
+m.search("laptop", filters={"user_id": "alice"}, reference_date="2024-01-01")
+# -> the Dell fact (valid then); a current search -> only the MacBook fact
+```
+
+**3. No evidence → exact abstention, never a hallucination.**
+
+```python
+m.chat("what did I eat for breakfast on 3 March 1999?", filters={"user_id": "alice"})
+# -> "I don't know. The chat history does not contain this information."  (verbatim)
+```
+
+**4. Multi-hop graph question.** On the HydraDB backend, `search` passes
+`graph_context=True` and merges scored path contexts as `graph` evidence —
+retrieval across a fact chain, which mem0 has nothing equivalent to:
+
+```python
+m.search("what city does my sister's partner work in?", filters={"user_id": "alice"})
+```
+
+## Quality gate (the junk-extraction fix)
+
+`EXTRACTION_SYSTEM` (v2, `src/hydrous/prompts.py`) instructs the extractor to
+score every candidate fact `0..1` and lists explicit REJECT categories with
+negative few-shots (small talk, one-off questions, assistant boilerplate,
+transient state, session logistics). `FactExtractor` drops anything below
+`quality_min_score` (env `QUALITY_MIN_SCORE`, default 0.4) or explicitly flagged
+(`"reject": true`), before storage. The score survives on the stored fact
+(`quality_score` in the local sqlite column and in HydraDB
+`additional_metadata`) for audit and later tuning. Extraction caching is keyed
+on a prompt version, so prompt edits invalidate old extractions automatically.
+
+## Feedback-loop prevention
+
+Anything `search()` returns is tagged (content-hash → memory id). Calling
+`add()` again with that exact content is a `NOOP` — no duplicate vectors, no
+poisoned memory from an agent re-saving what it just read:
+
+```python
+hit = m.search("favorite movie", filters={"user_id": "u"})["results"][0]
+m.add(hit["memory"], user_id="u")   # -> {"event": "NOOP", "id": <same id>}
+```
+
+## Migrating from mem0: `hydra-mem import-mem0`
+
+```bash
+uv run hydra-mem import-mem0 mem0_export.json --user-id alice
+# raw replay by default: memory text is stored as-is, created_at -> recorded_at,
+# user_id/agent_id scopes preserved; use --infer to re-extract facts instead.
+uv run hydra-mem search "hiking" --user-id alice
+```
+
+The export format is mem0's `get_all` JSON (`{"results": [{id, memory, metadata,
+created_at, user_id, ...}]}`). Exact re-import is idempotent (feedback-loop
+no-op). Together with the compat API, migration is zero-downside: keep your
+mem0 call sites, swap the import, replay your data.
+
+## License
+
+**AGPL-3.0** (see [LICENSE](LICENSE)). mem0's OSS is **Apache-2.0** — note the
+difference before vendoring Hydrous as a drop-in replacement in commercial /
+closed-source deployments: AGPL's copyleft obligations apply to the combined
+work. (Everyone is free to use it for personal, research, and internal tooling.)

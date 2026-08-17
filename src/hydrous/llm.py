@@ -208,7 +208,10 @@ def default_mock_handler(system: str, user: str) -> str:
 
 
 def _mock_extract(user: str) -> str:
-    """One fact per USER turn; predicate = first 3 content tokens (stable, deterministic)."""
+    """One fact per USER turn; predicate = first 3 content tokens (stable, deterministic).
+
+    Every fact carries confidence = 1.0 (mock content is always scored high); the
+    quality gate is exercised in dedicated tests with scripted low-confidence JSON."""
     date = _field(user, "Session date")
     facts = []
     seen = set()
@@ -223,7 +226,15 @@ def _mock_extract(user: str) -> str:
         if key in seen:
             continue
         seen.add(key)
-        facts.append({"subject": "user", "predicate": predicate, "value": content[:300], "fact_date": date})
+        facts.append(
+            {
+                "subject": "user",
+                "predicate": predicate,
+                "value": content[:300],
+                "fact_date": date,
+                "confidence": 1.0,
+            }
+        )
     return json.dumps(facts)
 
 

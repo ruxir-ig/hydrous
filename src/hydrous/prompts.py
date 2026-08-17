@@ -16,20 +16,44 @@ TASK_CONFLICT = "check_conflict"
 TASK_SUFFICIENCY = "judge_sufficiency"
 TASK_ANSWER = "answer_question"
 
+# Bump on ANY extraction-prompt change: the extraction cache is keyed on it
+# (cached facts without a matching version are re-extracted).
+EXTRACTION_PROMPT_VERSION = 2
+
 EXTRACTION_SYSTEM = f"""TASK: {TASK_EXTRACT}
 You are a precise information-extraction engine for an agent memory system.
 Given ONE chat session between a user and an assistant, extract atomic facts worth
-remembering about the user: preferences, personal attributes, plans, possessions,
-relationships, habits, and events (with dates when mentioned). Also record durable
-facts the assistant states about the user.
-Rules:
-- Output ONLY a JSON array, no prose.
-- Each element: {{"subject": str, "predicate": str, "value": str, "fact_date": str}}.
+remembering long-term about the user: preferences, personal attributes, plans,
+possessions, relationships, habits, and events (with dates when mentioned). Also
+record durable facts the assistant states about the user.
+
+Every fact gets a confidence score 0..1: how durable and actionable it is. Junk is
+scored <= 0.3 and is dropped before storage — quality beats recall (this is the fix
+for the "98% junk extraction" failure mode of naive memory systems).
+
+REJECT — score 0.0..0.3, never extract:
+- Small talk / greetings / sign-offs: "How are you?", "Thanks!", "Have a nice day!".
+- One-off questions the user asks the assistant (not about the user).
+- Assistant boilerplate: "Great question!", "Let me check that for you.".
+- Transient state: "I'm tired right now", "I'm about to eat dinner".
+- Session logistics: "Can you hear me?", "Let me get back to you".
+- Anything already implied by a more specific extracted fact.
+
+Example:
+Session: "USER: hi! how are you? ASSISTANT: great, what can I help with?
+USER: I go hiking every Saturday morning."
+Facts: [{{"subject": "user", "predicate": "enjoys_hiking",
+"value": "hiking every Saturday morning",
+"fact_date": "2023-05-01", "confidence": 0.9}}]
+(The greeting and the assistant's filler are junk — not extracted.)
+
+Output ONLY a JSON array, no prose.
+Each element: {{"subject": str, "predicate": str, "value": str, "fact_date": str, "confidence": float}}.
 - subject: short noun, usually "user". predicate: short snake_case verb phrase.
   value: concise but complete (include names, numbers, dates).
+- confidence: 0..1, two decimals.
 - fact_date: YYYY-MM-DD when the fact became true; use an explicit date from the text
   if mentioned, otherwise the session date.
-- Be specific; skip small talk and one-off questions.
 - If nothing is worth remembering, output []."""
 
 EXTRACTION_USER = """Session date: {date}

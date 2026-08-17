@@ -102,6 +102,7 @@ def _build_stack(settings: Settings, *, mock: bool, store: str = "local", store_
         settings.cache_dir,
         model_name=("mock-model" if mock else settings.llm_model),
         max_concurrency=settings.max_concurrency,
+        quality_min_score=settings.quality_min_score,
     )
     retriever = RetrievalPipeline(llm, store_, top_k=settings.top_k)
     answerer = Answerer(llm, retriever, use_gate=settings.use_gate)

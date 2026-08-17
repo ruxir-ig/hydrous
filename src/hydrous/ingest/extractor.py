@@ -23,6 +23,18 @@ from ..text_utils import compare_dates, date_key
 log = logging.getLogger(__name__)
 
 
+def llm_confidence(raw: dict) -> float | None:
+    """Extraction LLM confidence (0..1) -> float; None when the model didn't score."""
+    c = raw.get("confidence")
+    if c is None:
+        return None
+    try:
+        score = float(c)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, score))
+
+
 def parse_json_array(text: str) -> list[dict]:
     """Robustly extract a JSON array of objects from an LLM response."""
     start, end = text.find("["), text.rfind("]")
@@ -54,8 +66,13 @@ def make_fact_id(question_id: str, session_id: str, raw: dict) -> str:
 
 
 class ExtractionCache:
-    def __init__(self, cache_dir: str | Path):
+    """Disk cache per (question_id, session_id), keyed on model + extraction-prompt
+    version. Old entries (missing or different prompt_version) are cache misses, so
+    editing EXTRACTION_SYSTEM invalidates extractions without manual cache wipes."""
+
+    def __init__(self, cache_dir: str | Path, prompt_version: int):
         self._dir = Path(cache_dir) / "extractions"
+        self._prompt_version = prompt_version
 
     def _path(self, question_id: str, session_id: str) -> Path:
         safe = f"{question_id}__{session_id}".replace("/", "_")
@@ -69,14 +86,19 @@ class ExtractionCache:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
-        if data.get("model") != model:
+        if data.get("model") != model or data.get("prompt_version") != self._prompt_version:
             return None
         return data.get("facts", []), data.get("summary", "")
 
     def save(self, question_id: str, session_id: str, model: str, facts: list[dict], summary: str) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
         path = self._path(question_id, session_id)
-        payload = {"model": model, "facts": facts, "summary": summary}
+        payload = {
+            "model": model,
+            "prompt_version": self._prompt_version,
+            "facts": facts,
+            "summary": summary,
+        }
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
@@ -90,14 +112,19 @@ class FactExtractor:
         model_name: str = "unknown",
         max_concurrency: int = 8,
         conflict_threshold: float = 0.75,
+        quality_min_score: float = 0.4,
     ):
         self._llm = llm
         self._store = store
-        self._cache = ExtractionCache(cache_dir)
+        self._cache = ExtractionCache(cache_dir, prompts.EXTRACTION_PROMPT_VERSION)
         self._model = model_name
         self._sem = asyncio.Semaphore(max_concurrency)
         self._ingest_sem = asyncio.Semaphore(max_concurrency)
         self._conflict_threshold = conflict_threshold
+        # Quality gate: facts below this confidence are dropped before storage
+        # (the fix for mem0-style junk extraction). The LLM's confidence is the
+        # score; it is kept on the stored Fact (quality_score) for audit/reuse.
+        self._quality_min_score = quality_min_score
 
     @property
     def store(self) -> MemoryStore:
@@ -123,6 +150,17 @@ class FactExtractor:
         return facts, summary
 
     def _build_fact(self, question_id: str, session: Session, raw: dict) -> Fact | None:
+        """Build a Fact, applying the quality gate. Returns None for junk/rejects."""
+        reject = raw.get("reject") in (True, "true", "yes", "1")
+        score = llm_confidence(raw)
+        if reject or (score is not None and score < self._quality_min_score):
+            log.debug(
+                "quality gate dropped fact %r (score=%s, reject=%s)",
+                {k: raw.get(k) for k in ("subject", "predicate", "value")},
+                score,
+                reject,
+            )
+            return None
         subject = str(raw.get("subject", "")).strip()
         predicate = str(raw.get("predicate", "")).strip()
         value = str(raw.get("value", "")).strip()
@@ -140,6 +178,7 @@ class FactExtractor:
             fact_date=fact_date,
             session_id=session.session_id,
             valid_from=fact_date,
+            quality_score=score,
         )
 
     async def ingest_question(
@@ -165,6 +204,27 @@ class FactExtractor:
         # Sessions are versioned+ingested in bounded parallel: the dominant cost
         # is server-side indexing, which pipelines across concurrent ingests.
         await asyncio.gather(*(_process(s, f) for s, (f, _) in zip(sessions, results, strict=True)))
+
+    async def store_facts(
+        self, question_id: str, facts: list[Fact], *, session: Session | None = None
+    ) -> None:
+        """Apply supersession + persist facts (optionally alongside their session).
+        `session=None` stores facts only — used by the mem0-compat infer=True path,
+        which mirrors mem0 (extracted memories only, no raw conversation)."""
+        if not facts:
+            return
+        await self._apply_versioning(question_id, facts)
+        if session is not None:
+            await self._store.add_session(question_id, session, facts=facts)
+        await self._store.add_facts(question_id, facts)
+
+    async def ingest_session(self, question_id: str, session: Session) -> tuple[list[Fact], str]:
+        """Extract (cache-first) + apply supersession + store ONE session with its
+        facts. Public single-session entry point (used by the mem0-compat API)."""
+        facts, summary = await self.extract_session(question_id, session)
+        session.summary = summary
+        await self.store_facts(question_id, facts, session=session)
+        return facts, summary
 
     async def _apply_versioning(self, question_id: str, new_facts: list[Fact]) -> None:
         """Close validity intervals of currently-valid facts contradicted by new ones."""

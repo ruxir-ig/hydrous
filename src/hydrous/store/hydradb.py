@@ -87,24 +87,27 @@ _MAX_INGEST_BATCH = 100  # sources per ingest / status / delete call (server cap
 
 def fact_to_memory_item(fact: Fact) -> dict:
     """Fact -> wire MemoryItem dict (metadata is a map; the SDK's str type is stale)."""
+    am = {
+        "question_id": fact.question_id,
+        "kind": "fact",
+        "session_id": fact.session_id,
+        "subject": fact.subject,
+        "predicate": fact.predicate,
+        "value": fact.value,
+        "fact_date": fact.fact_date,
+        "valid_from": fact.valid_from,
+        "valid_to": fact.valid_to,
+        "superseded_by": fact.superseded_by,
+    }
+    if fact.quality_score is not None:  # quality gate score, auditable post-hoc
+        am["quality_score"] = fact.quality_score
     return {
         "id": fact.id,
         "title": f"{fact.subject} {fact.predicate}",
         "text": fact.text,
         "infer": True,
         "metadata": {"question_id": fact.question_id, "kind": "fact"},
-        "additional_metadata": {
-            "question_id": fact.question_id,
-            "kind": "fact",
-            "session_id": fact.session_id,
-            "subject": fact.subject,
-            "predicate": fact.predicate,
-            "value": fact.value,
-            "fact_date": fact.fact_date,
-            "valid_from": fact.valid_from,
-            "valid_to": fact.valid_to,
-            "superseded_by": fact.superseded_by,
-        },
+        "additional_metadata": am,
     }
 
 
@@ -152,6 +155,18 @@ def session_to_memory_items(question_id: str, session: Session) -> list[dict]:
         text = session.text
         if len(text) > _MAX_PAIR_CHARS:
             text = text[:_MAX_PAIR_CHARS]
+        am = {
+            "question_id": question_id,
+            "kind": "session",
+            "session_id": session.session_id,
+            "date": session.date,
+            "summary": session.summary,
+            "recorded_at": session.recorded_at,
+            "part": 0,
+        }
+        meta_json = json.dumps(session.metadata, ensure_ascii=False, default=str)
+        if meta_json and len(meta_json) <= 700:
+            am["meta"] = meta_json
         return [
             {
                 "id": f"{question_id}:{session.session_id}",
@@ -159,14 +174,7 @@ def session_to_memory_items(question_id: str, session: Session) -> list[dict]:
                 "text": session.text,
                 "infer": True,
                 "metadata": {"question_id": question_id, "kind": "session"},
-                "additional_metadata": {
-                    "question_id": question_id,
-                    "kind": "session",
-                    "session_id": session.session_id,
-                    "date": session.date,
-                    "summary": session.summary,
-                    "part": 0,
-                },
+                "additional_metadata": am,
             }
         ]
 
@@ -191,6 +199,7 @@ def session_to_memory_items(question_id: str, session: Session) -> list[dict]:
         cost += c
 
     items: list[dict] = []
+    meta_json = json.dumps(session.metadata, ensure_ascii=False, default=str)
     for i, part_pairs in enumerate(parts):
         sid = session.session_id if i == 0 else f"{session.session_id}#{i}"
         am = {
@@ -203,6 +212,9 @@ def session_to_memory_items(question_id: str, session: Session) -> list[dict]:
         }
         if i == 0:
             am["summary"] = session.summary
+            am["recorded_at"] = session.recorded_at  # mem0 created_at replay
+            if meta_json and len(meta_json) <= 700:  # respects the 1024B am cap
+                am["meta"] = meta_json
         items.append(
             {
                 "id": f"{question_id}:{sid}",
@@ -691,6 +703,11 @@ class HydraDBStore(MemoryStore):
             if not all(k in am for k in required):
                 log.warning("skipping malformed fact memory %s", m.get("memory_id"))
                 continue
+            qs = am.get("quality_score")
+            try:
+                qs = float(qs) if qs not in (None, "") else None
+            except (TypeError, ValueError):
+                qs = None
             facts.append(
                 Fact(
                     id=m.get("memory_id") or "",
@@ -702,8 +719,9 @@ class HydraDBStore(MemoryStore):
                     session_id=am["session_id"],
                     valid_from=am["valid_from"],
                     valid_to=am.get("valid_to"),
-                    recorded_at=m.get("timestamp") or "",
+                    recorded_at=m.get("timestamp") or am.get("recorded_at") or "",
                     superseded_by=am.get("superseded_by"),
+                    quality_score=qs,
                 )
             )
         return facts
@@ -732,11 +750,18 @@ class HydraDBStore(MemoryStore):
                         "context.inspect failed for session part %s", m.get("memory_id"), exc_info=True
                     )
             am = (parts[0].get("additional_metadata") or {}) if parts else {}
+            meta_raw = am.get("meta") or ""
+            try:
+                meta = json.loads(meta_raw) if isinstance(meta_raw, str) and meta_raw else {}
+            except json.JSONDecodeError:
+                meta = {}
             sessions.append(
                 Session(
                     session_id=sid,
                     date=str(am.get("date") or ""),
                     summary=am.get("summary"),
+                    recorded_at=str(am.get("recorded_at") or ""),
+                    metadata=meta if isinstance(meta, dict) else {},
                     turns=turns,
                 )
             )
@@ -816,6 +841,19 @@ class HydraDBStore(MemoryStore):
                 ids=ids[start : start + _MAX_INGEST_BATCH],
                 type="memory",
             )
+
+    async def delete_memory(self, question_id: str, memory_id: str) -> None:
+        """Delete ONE memory (source id — the same id used by ingest/update). No-op if unknown."""
+        await self._ensure_database_ready()
+        try:
+            await self._client.context.delete(
+                database=self._database,
+                collection=self._collection(question_id),
+                ids=[memory_id],
+                type="memory",
+            )
+        except Exception:
+            log.warning("HydraDB delete_memory(%s) failed", memory_id, exc_info=True)
 
     def close(self) -> None:
         pass
