@@ -310,6 +310,14 @@ uv run ruff check
 
 (Append decisions + gotchas here as they happen; newest first.)
 
+- 2026-08-18: **Evaluating on code.in2peta.com — MAX_CONCURRENCY tuning (empirical)**:
+  the gateway is parallelism-sensitive, not rate-limited. Measured: 12 → catastrophic
+  (~6 calls/min, 504 flapping); 6 → safe (~20/min, ~3% 504 all retried); 8 → best
+  (~25-27/min sustained, ~4-5% 504 all retried — 1.8x throughput, no failures).
+  The 500-instance run restarted at 8. If the endpoint changes, re-probe with a
+  3-4 min window at each candidate setting before committing (resumable, cheap).
+  Session extract-summary pairs dominate cost (~85 LLM calls/question); extraction
+  cache makes interrupted questions cheap to resume.
 - 2026-08-18: Self-hosting HydraDB — license + feasibility verdict (user asked "can we
   download their repo, run it locally, bundle for offline use"). Findings:
   - **hydra-db/hydradb (github, 518★, homepage hydradb.com) is AGPL-3.0** — the same
