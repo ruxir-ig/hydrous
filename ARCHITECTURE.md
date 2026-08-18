@@ -310,6 +310,30 @@ uv run ruff check
 
 (Append decisions + gotchas here as they happen; newest first.)
 
+- 2026-08-18: Self-hosting HydraDB — license + feasibility verdict (user asked "can we
+  download their repo, run it locally, bundle for offline use"). Findings:
+  - **hydra-db/hydradb (github, 518★, homepage hydradb.com) is AGPL-3.0** — the same
+    license hydrous uses; running it locally and bundling it with our AGPL project is
+    license-compatible. Docker image exists (ghcr.io/hydra-db/hydradb); docker is
+    available on this machine; needs S3-compatible object storage (SlateDB backend).
+  - **The `hydradb-sdk` pip package we import is SEPARATELY proprietary**: "All Rights
+    Reserved / PROPRIETARY AND CONFIDENTIAL / use as part of the Hydra DB service; you
+    may not copy, modify, create derivative works, distribute..." (verified against the
+    installed dist-info license). It can NEVER be bundled or redistributed.
+  - **The OSS repo is the graph storage/query ENGINE (OpenCypher/Bolt/HTTPS query API;
+    graph-node + graph-indexer); it has NO memory-ingestion API** — no
+    ingest(type=memory|knowledge), no collections-weighted search, no webhooks (full
+    source tree checked: no route handlers/openapi). Those endpoints live in the cloud
+    service the SDK talks to. Our Phase-1 adapter speaks the SDK wire contract, so
+    pointing it at a local OSS engine = writing a NEW adapter against a different API
+    with unknown parity to the verified cloud semantics — a real project.
+  - **Bottleneck clarification**: the 500-eval runs --store local (sqlite); its
+    bottleneck is the LLM endpoint (code.in2peta.com), not the DB. Self-hosting
+    HydraDB does not speed it up.
+  - **Decision**: keep the eval on the local store; do NOT pivot to self-hosted HydraDB.
+    "Offline, no cloud dependency" already ships today as the default local SQLite store.
+    If a local/embedded graph store is ever wanted, the AGPL hydradb engine is a
+    legitimate candidate but as a native-adapter Phase-4 item.
 - 2026-08-18: Phase 3 — grow it into the product (in progress). Decisions + gotchas:
   - **Full 500-instance eval PAUSED by user decision**: the LLM endpoint
     (code.in2peta.com deepseek-v4-flash) serializes under load and 504s at
