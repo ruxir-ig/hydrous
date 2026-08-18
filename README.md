@@ -32,6 +32,8 @@ design, algorithms, eval protocol, current status, and handoff notes.
 | `search(reference_date=...)` raises "platform-only" | `reference_date` **works**: true as-of time-travel over validated intervals |
 | No answering at all (`chat()` raises `NotImplementedError`) | `chat()` retrieves + reads, and **abstains with the exact string** when evidence is missing — no hallucination |
 | No multi-hop | HydraDB `graph_context` lanes merged into evidence (scored path contexts); nothing equivalent in mem0 |
+| Memory only | **RAG + memory in one database**: multi-corpus `type="memory"\|"knowledge"` with per-scope `collections` weighting |
+| Polls for indexing status | **Webhook-driven indexing**: `hydra-mem serve --callback-url ...` registers `indexing.status_changed` and wakes on events (polling kept as fallback) |
 | No migration path | `hydra-mem import-mem0` replays a `get_all` export preserving `created_at → recorded_at` |
 
 ---
@@ -46,6 +48,26 @@ uv run hydrous eval --limit 10          # real LongMemEval run
 uv run hydrous eval --limit 10 --mock   # deterministic dry run, no key needed
 uv run pytest                            # all tests pass with no API key
 ```
+
+### TypeScript SDK (`typescript/`)
+
+```bash
+cd typescript && npm test        # builds + E2E suite against a real server (MockLLM)
+cd ..
+.venv/bin/hydra-mem serve --mock --port 8765          # HTTP bridge for the SDK
+```
+
+```ts
+import { Memory } from "hydrous-ts";
+const m = new Memory({ baseUrl: "http://127.0.0.1:8765" });
+await m.add("I love hiking on weekends", { user_id: "alice" });
+const hits = await m.search("hiking", { filters: { user_id: "alice" } });
+```
+
+The TS SDK mirrors the mem0 surface (`add` / `search` / `get_all` / `get` /
+`history` / `update` / `delete` / `delete_all` / `reset`) plus the hydrous
+extensions (`chat`, `add_knowledge`, `reference_date`, weighted `collections`)
+over the `hydra-mem serve` HTTP bridge. Dependency-free (global `fetch`).
 
 ### mem0 drop-in usage
 
@@ -174,6 +196,46 @@ The export format is mem0's `get_all` JSON (`{"results": [{id, memory, metadata,
 created_at, user_id, ...}]}`). Exact re-import is idempotent (feedback-loop
 no-op). Together with the compat API, migration is zero-downside: keep your
 mem0 call sites, swap the import, replay your data.
+
+## RAG + memory in one database
+
+The unified multi-corpus story: the same database holds the scope's **memory**
+bucket (`type="memory"`) and a **knowledge** corpus (`type="knowledge"`),
+searched together with per-scope `collections` weights:
+
+```python
+m.add_knowledge("The hydrous engine stores bi-temporal facts", user_id="alice")
+m.search("bi-temporal facts", filters={"user_id": "alice"},
+         collections=[{"name": "knowledge", "weight": 0.5},
+                      {"name": "memory", "weight": 1.0}])
+```
+
+No `collections` = memory bucket only (mem0 behavior). On HydraDB the weighted
+shape maps to the query API's `collections` dict; on the local store the buckets
+are isolated `question_id` rows with weight-scaled lane ranks merged by RRF.
+
+## Webhook-driven indexing (replaces polling)
+
+When you have a public callback URL, `hydra-mem serve` registers HydraDB's
+`indexing.status_changed` webhook and ingests stop polling — the server's
+`/webhooks/hydradb/indexing` endpoint marks the shared tracker and waits wake
+within ~0.5s:
+
+```bash
+hydra-mem serve --store hydradb \
+    --callback-url https://your-tunnel.example --port 8765
+# (tunnel the port to a public https URL, e.g. a reverse proxy or ssh -R)
+```
+
+Plain polling remains the fallback when no tracker is attached or on timeout.
+`hydra-mem webhook-register URL` registers the webhook without serving.
+
+## LongMemEval comparison
+
+See [docs/comparison.md](docs/comparison.md) for the table and full methodology:
+GPT-4o baseline 60.6%, oracle 87.0%, mem0's published (platform) 94.4 with their
+protocol caveats; Hydrous's full 500-instance run is in progress (pilot subsets
+and this repo's status are documented there).
 
 ## License
 

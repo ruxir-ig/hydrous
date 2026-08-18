@@ -10,7 +10,9 @@ from __future__ import annotations
 import functools
 import json
 import sqlite3
+from datetime import date
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -128,6 +130,27 @@ class LocalMemoryStore(MemoryStore):
         )
         self._conn.commit()
 
+    async def add_knowledge(self, question_id: str, documents: list[dict]) -> list[str]:
+        """Store knowledge docs in the `{question_id}_knowledge` bucket (one
+        session-row per doc) — the RAG segment of the multi-corpus story."""
+        bucket = f"{question_id}_knowledge"
+        ids: list[str] = []
+        for doc in documents:
+            text = doc.get("text") if isinstance(doc, dict) else str(doc)
+            if not text:
+                continue
+            sid = "know_" + uuid4().hex[:16]
+            await self.add_session(
+                bucket,
+                Session(
+                    session_id=sid, date=date.today().isoformat(),
+                    turns=[Turn(role="user", content=str(text))],
+                    metadata={"kind": "knowledge"},
+                ),
+            )
+            ids.append(sid)
+        return ids
+
     async def add_facts(self, question_id: str, facts: list[Fact]) -> None:
         if not facts:
             return
@@ -213,14 +236,14 @@ class LocalMemoryStore(MemoryStore):
 
     async def get_sessions(self, question_id: str) -> list[Session]:
         sessions = []
-        for sid, date, _text, summary, recorded_at, meta, _emb in self._load_sessions(question_id):
+        for sid, sdate, _text, summary, recorded_at, meta, _emb in self._load_sessions(question_id):
             rows = self._conn.execute(
                 "SELECT role, content FROM turns WHERE question_id = ? AND session_id = ? ORDER BY idx",
                 (question_id, sid),
             ).fetchall()
             sessions.append(
                 Session(
-                    session_id=sid, date=date, summary=summary,
+                    session_id=sid, date=sdate, summary=summary,
                     recorded_at=recorded_at, metadata=meta,
                     turns=[Turn(role=r["role"], content=r["content"]) for r in rows],
                 )
@@ -274,12 +297,54 @@ class LocalMemoryStore(MemoryStore):
         include_facts: bool = True,
         include_sessions: bool = True,
         include_superseded: bool = False,
+        collections: list[dict] | None = None,
     ) -> list[Evidence]:
+        """Multi-corpus weighted search. `collections` = [{"name": bucket, "weight": w}];
+        each bucket is lane-ranked independently, then its scores are scaled by
+        `weight` and merged (dedupe keeps the highest score per evidence key)."""
+        if not collections:
+            return (await self._search_bucket(
+                question_id, query, as_of_date, include_facts, include_sessions,
+                include_superseded, weight=1.0,
+            ))[:top_k]
+
+        best: dict[tuple[str, str], Evidence] = {}
+        for entry in collections:
+            name = str(entry.get("name") or question_id)
+            weight = float(entry.get("weight") or 0.0)
+            if weight <= 0:
+                continue
+            is_base = name == question_id
+            for ev in await self._search_bucket(
+                name, query,
+                as_of_date if is_base else None,
+                include_facts if is_base else False,  # knowledge buckets hold docs, not facts
+                True,
+                include_superseded if is_base else False,
+                weight=weight,
+            ):
+                if ev.key not in best or ev.score > best[ev.key].score:
+                    best[ev.key] = ev
+        out = sorted(best.values(), key=lambda e: e.score, reverse=True)
+        return out[:top_k]
+
+    async def _search_bucket(
+        self,
+        bucket: str,
+        query: str,
+        as_of_date: str | None,
+        include_facts: bool,
+        include_sessions: bool,
+        include_superseded: bool,
+        *,
+        weight: float,
+    ) -> list[Evidence]:
+        """One collection's lane-separated RRF pass, scores scaled by `weight`."""
         candidates: list[Evidence] = []
         embs: list[np.ndarray] = []
         lanes: list[list[int]] = [[], []]
         if include_facts:
-            for fact, emb in self._load_facts(question_id):
+            for fact, emb in self._load_facts(bucket):
                 if not include_superseded and not fact.valid_as_of(as_of_date):
                     continue
                 lanes[0].append(len(candidates))
@@ -291,7 +356,7 @@ class LocalMemoryStore(MemoryStore):
                 )
                 embs.append(emb)
         if include_sessions:
-            for sid, date, text, _summary, _recorded_at, _meta, emb in self._load_sessions(question_id):
+            for sid, date, text, _summary, _recorded_at, _meta, emb in self._load_sessions(bucket):
                 lanes[1].append(len(candidates))
                 candidates.append(Evidence(source="session", text=text, date=date, session_id=sid))
                 embs.append(emb)
@@ -311,18 +376,18 @@ class LocalMemoryStore(MemoryStore):
         # Lane-separated RRF: facts compete against facts, sessions against
         # sessions, so hundreds of short fact snippets cannot drown out long
         # gold sessions (which lose token-overlap counts despite matching).
-        for idxs, weight in ((lanes[0], _FACT_LANE_WEIGHT), (lanes[1], 1.0)):
+        for idxs, lane_weight in ((lanes[0], _FACT_LANE_WEIGHT), (lanes[1], 1.0)):
             if not idxs:
                 continue
             dense_ranks = _ranks(dense_scores[idxs])
             bm25_ranks = _ranks(np.asarray(bm25_scores[idxs], dtype=np.float64))
             for pos, i in enumerate(idxs):
-                candidates[i].score = weight * (
+                candidates[i].score = weight * lane_weight * (
                     1.0 / (_RRF_K + dense_ranks[pos]) + 1.0 / (_RRF_K + bm25_ranks[pos])
                 )
 
         candidates.sort(key=lambda e: e.score, reverse=True)
-        return candidates[:top_k]
+        return candidates
 
     def close(self) -> None:
         self._conn.close()

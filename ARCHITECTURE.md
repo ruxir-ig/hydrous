@@ -291,12 +291,79 @@ uv run ruff check
 - [x] Phase 2 — `hydra-mem import-mem0` (mem0 `get_all` export replay, `created_at → recorded_at`)
 - [x] Phase 2 — README positioning: four "mem0 cannot do" demos (`hydra-mem demo`), AGPL-vs-Apache
       license flag; LICENSE (AGPL-3.0) added
-- [ ] Full 500-instance run + score vs 0.606 baseline / 0.870 oracle
+- [x] Phase 3 — live cloud re-probe (quality_score / meta+recorded_at round-trips,
+      `delete_memory`, graph_context) — all green on the real API
+- [x] Phase 3 — PyPI packaging readiness (names free; single dist `hydrous` ships both
+      packages; license metadata + classifiers; `uv build` + twine check PASSED; not published)
+- [x] Phase 3 — webhook-driven indexing (IndexingTracker + server /webhooks/hydradb/indexing;
+      `HydraDBStore._wait_indexed` webhook mode with polling fallback;
+      `register_indexing_webhook` + `hydra-mem serve --callback-url` / `webhook-register`)
+- [x] Phase 3 — multi-corpus `type="knowledge"|"memory"` + per-scope `collections` weighting
+      (SDK `Dict[str, float]` shape; local weighted RRF merge; compat `add_knowledge` + `search(collections=...)`)
+- [x] Phase 3 — TypeScript SDK (`typescript/`, package hydrous-ts): mem0 surface over the
+      HTTP bridge, dependency-free, strict TS, 7 E2E tests green (npm test)
+- [x] Phase 3 — docs site (`docs/index.html` + `docs/comparison.md`) + README Phase-3 sections
+- [ ] Full 500-instance run + score vs 0.606 baseline / 0.870 oracle (started, paused on
+      endpoint 504s — resumable at data/hyp_phase3_500.jsonl; see docs/comparison.md)
 
 ## Handoff notes for agents
 
 (Append decisions + gotchas here as they happen; newest first.)
 
+- 2026-08-18: Phase 3 — grow it into the product (in progress). Decisions + gotchas:
+  - **Full 500-instance eval PAUSED by user decision**: the LLM endpoint
+    (code.in2peta.com deepseek-v4-flash) serializes under load and 504s at
+    MAX_CONCURRENCY=12; measured ~17 min/question → ~25h wall for 500. Killed the
+    run at 1/500 (data/hyp_phase3_500.jsonl is resumable; resume command documented
+    in docs/comparison.md). Everything else in Phase 3 continues; revisit the run
+    when the endpoint recovers. Comparison table (docs/comparison.md) publishes
+    baseline 60.6 / oracle 87.0 / mem0 platform 94.4 (with mem0's verbatim
+    platform caveat; their new algorithm is single-pass ADD-only — our append-only
+    design) + methodology.
+  - **Live cloud re-probe green** (scripts/probe_phase3.py): quality_score round-trips
+    (0.87/None), session recorded_at + meta round-trips, delete_memory via
+    context.delete works, graph_context object present (0 paths on the tiny corpus —
+    expected). Probe uses its own DB + cleans up; run only against a real key.
+  - **PyPI-ready**: name free (hydrous/hydra-mem confirmed 404 on PyPI). Single
+    distribution "hydrous" ships BOTH packages (hydra_mem imports hydrous internals;
+    two dists would force a cross-dist dep) + `hydrous`/`hydra-mem` entry points.
+    `uv build` + `uvx twine check` PASSED; wheel carries LICENSE + both packages.
+    Not published (no token; user-run step).
+  - **Webhook-driven indexing**: hydra_db SDK has per-org `webhooks.register(
+    event_types=["indexing.status_changed"], url=...)`. `hydra_mem.indexing.
+    IndexingTracker` is a thread-safe {(db, coll, id): status} handshake; the
+    server's /webhooks/hydradb/indexing marks it; `HydraDBStore._wait_indexed`
+    clears-then-waits on it (fresh marks only; stale completed from a previous
+    ingest must not satisfy the new one) and returns with NO status call when all
+    sources are marked; polling is the timeout fallback. `register_indexing_webhook`
+    on store + `hydra-mem serve --callback-url` / `hydra-mem webhook-register`.
+    Webhook payload shape is best-effort tolerant (`ids|id|memory_id|source_id|data[]`);
+    the real payload was never observed (needs a public URL) — treat field names as
+    provisional until a live delivery is inspected.
+  - **HTTP server is stdlib** (`hydra_mem/server.py`, ThreadingHTTPServer) — no
+    fastapi/uvicorn dep. Routes: POST /add /search /get_all /update /delete /
+    /delete_all /reset /chat /add_knowledge /import-mem0; GET /get/{id} /history/{id};
+    POST /webhooks/hydradb/indexing; GET /health. Error mapping: 400 TypeError,
+    422 ValueError (mem0-parity validation), 501 NotImplementedError, 404 unknown
+    route, 404 for get() of unknown id (mem0 parity: get returns null over HTTP).
+  - **Multi-corpus + collections weighting**: SDK verified — ingest
+    `type=Literal['knowledge','memory']`; query `collections` accepts
+    `Dict[str, float]` weighted shape and must NOT be sent with a single
+    `collection` key (we pop it). Memory bucket = `qid_{scope}`, knowledge bucket =
+    `qid_{scope}_knowledge`. Compat: `add_knowledge(text|list)` + `search(
+    collections=[{"name": "memory"|"knowledge"|raw, "weight": w}])`; friendly names
+    translate via `_collection_bucket`. Local store: knowledge docs are session rows
+    in the `_knowledge` question_id bucket; weighted merge = per-bucket lane RRF
+    scaled by weight, dedupe by evidence key. weight=0 excludes (BUG CAUGHT BY TEST:
+    `c.get("weight") or 1.0` turned 0.0 into 1.0 — use explicit None check).
+    delete_all/reset also wipe the `_knowledge` bucket.
+  - **TS SDK** (typescript/, package "hydrous-ts", AGPL): dependency-free client
+    (global fetch) mirroring the mem0 surface over the HTTP bridge; strict TS,
+    tsc → dist (ESM + .d.ts); tests are node:test spawning the REAL python server
+    (typescript/test/server_helper.py — must use .venv/bin/python, system python3
+    lacks deps) and exercising the full surface E2E (7 tests green). Server needs
+    the `/add_knowledge` route (added AFTER first build — POST_ROUTES must include
+    every compat method the SDK exposes).
 - 2026-08-17 (Phase 2.1 patch — review closure on Phase 2): Decisions + gotchas:
   - **`get(memory_id)` + `history(memory_id)` added** — mem0 parity shapes, verified
     against mem0's source: `get` returns the item dict or **None** (does NOT raise);

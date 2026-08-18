@@ -44,6 +44,7 @@ import json
 import logging
 import re
 import time
+from uuid import uuid4
 
 from ..schema import Evidence, Fact, Session, Turn
 from ..text_utils import compare_dates, tokenize
@@ -346,6 +347,8 @@ class HydraDBStore(MemoryStore):
         base_url: str | None = None,
         poll_interval: float = 2.0,
         poll_timeout: float = 600.0,
+        webhook_tracker: object | None = None,
+        webhook_interval: float = 0.5,
     ):
         try:
             from hydra_db import AsyncHydraDB
@@ -359,6 +362,11 @@ class HydraDBStore(MemoryStore):
         self._database = database
         self._poll_interval = poll_interval
         self._poll_timeout = poll_timeout
+        # Webhook-driven indexing: when a tracker is attached (hydra-mem serve
+        # --callback-url), _wait_indexed wakes on indexing.status_changed events
+        # instead of polling; polling remains the fallback.
+        self._webhook_tracker = webhook_tracker
+        self._webhook_interval = webhook_interval
         self._ready = False
         self._ingest_window: list[tuple[float, int]] = []
         self._ingest_window_lock = asyncio.Lock()
@@ -387,8 +395,37 @@ class HydraDBStore(MemoryStore):
             await asyncio.sleep(self._poll_interval)
         raise TimeoutError(f"HydraDB database {self._database!r} not ready within {self._poll_timeout}s")
 
+    def _raise_if_failed(self, statuses: list) -> None:
+        failed = [s for s in statuses if s.indexing_status == "failed"]
+        if failed:
+            raise RuntimeError(
+                "HydraDB indexing failed: "
+                + json.dumps([(s.id, s.error_message) for s in failed])
+            )
+
     async def _wait_indexed(self, collection: str, ids: list[str]) -> None:
         deadline = time.monotonic() + self._poll_timeout
+        if self._webhook_tracker is not None:
+            # Webhook-driven: wait for indexing.status_changed marks, poll as backstop.
+            tracker = self._webhook_tracker
+            tracker.clear(self._database, collection, ids)  # fresh ingest = fresh marks
+            pending = set(ids)
+            while pending and time.monotonic() < deadline:
+                done = tracker.done(self._database, collection, pending)
+                if done:
+                    failed = tracker.failed(self._database, collection, done)
+                    if failed:
+                        raise RuntimeError(
+                            "HydraDB indexing failed: " + json.dumps(sorted(failed))
+                        )
+                    pending -= done
+                    if not pending:
+                        return  # every source terminal per the webhook — no polling
+                await asyncio.sleep(self._webhook_interval)
+            log.warning(
+                "webhook wait timed out for %s/%s; falling back to status polling",
+                self._database, collection,
+            )
         while time.monotonic() < deadline:
             st = await self._client.context.status(
                 database=self._database, collection=collection, ids=ids
@@ -399,15 +436,23 @@ class HydraDBStore(MemoryStore):
                 continue
             done = {s.id for s in statuses if s.indexing_status in ("completed", "failed")}
             if done and len(done) >= len(set(ids)):
-                failed = [s for s in statuses if s.indexing_status == "failed"]
-                if failed:
-                    raise RuntimeError(
-                        "HydraDB indexing failed: "
-                        + json.dumps([(s.id, s.error_message) for s in failed])
-                    )
+                self._raise_if_failed(statuses)
                 return
             await asyncio.sleep(self._poll_interval)
         raise TimeoutError(f"HydraDB collection {collection!r} not indexed within {self._poll_timeout}s")
+
+    async def register_indexing_webhook(
+        self, url: str, *, signing_secret: str | None = None
+    ) -> None:
+        """Subscribe this API key's org to `indexing.status_changed` events.
+
+        Requires a PUBLIC callback URL (e.g. a tunnel to `hydra-mem serve`).
+        Registering is per-org, so it also covers collections stored by other keys."""
+        await self._client.webhooks.register(
+            event_types=["indexing.status_changed"],
+            url=url,
+            signing_secret=signing_secret,
+        )
 
     async def _acquire_ingest_budget(self, cost: int) -> None:
         """Token-window pacing: cap concurrent ingests at ~_PER_MIN_BUDGET
@@ -427,14 +472,23 @@ class HydraDBStore(MemoryStore):
                 oldest = self._ingest_window[0]
                 await asyncio.sleep(oldest[0] + 60.0 - now + 0.05)
 
-    async def _ingest_items(self, question_id: str, items: list[dict]) -> None:
+    async def _ingest_items(
+        self,
+        question_id: str,
+        items: list[dict],
+        *,
+        item_type: str = "memory",
+        collection: str | None = None,
+    ) -> None:
+        """Cost-chunked, rate-paced ingest. `item_type` is the multi-corpus
+        corpus selector: "memory" (default) or "knowledge" (RAG docs)."""
         if not items:
             return
         from hydra_db.core.api_error import ApiError
         from hydra_db.errors.content_too_large_error import ContentTooLargeError
 
         await self._ensure_database_ready()
-        collection = self._collection(question_id)
+        collection = collection or self._collection(question_id)
         # The server enforces a ~1000 "memory_tokens" budget per ingest request,
         # so split the payload into cost-bounded chunks (one request each).
         chunks: list[list[dict]] = [[]]
@@ -454,7 +508,7 @@ class HydraDBStore(MemoryStore):
             for attempt in range(_RATE_RETRIES):
                 try:
                     resp = await self._client.context.ingest(
-                        type="memory",
+                        type=item_type,
                         database=self._database,
                         collection=collection,
                         memories=json.dumps(batch),
@@ -538,6 +592,29 @@ class HydraDBStore(MemoryStore):
             return
         await self._ingest_items(question_id, [fact_to_memory_item(f) for f in facts])
 
+    async def add_knowledge(self, question_id: str, documents: list[dict]) -> list[str]:
+        """RAG corpus: ingest docs as type="knowledge" into
+        `{collection}_knowledge` — the multi-corpus sibling of the memory bucket."""
+        bucket = f"{self._collection(question_id)}_knowledge"
+        items: list[dict] = []
+        for doc in documents:
+            text = doc.get("text") if isinstance(doc, dict) else str(doc)
+            if not text:
+                continue
+            sid = "know_" + uuid4().hex[:16]
+            items.append(
+                {
+                    "id": sid,
+                    "title": "knowledge",
+                    "text": str(text),
+                    "infer": True,
+                    "metadata": {"question_id": question_id, "kind": "knowledge"},
+                    "additional_metadata": {"question_id": question_id, "kind": "knowledge"},
+                }
+            )
+        await self._ingest_items(question_id, items, item_type="knowledge", collection=bucket)
+        return [i["id"] for i in items]
+
     async def update_fact(self, fact: Fact) -> None:
         # metadata PATCH on the stable id — no re-ingest; verified to sync to the
         # vector store (query-time metadata_filters on patched keys match).
@@ -559,6 +636,7 @@ class HydraDBStore(MemoryStore):
         include_facts: bool = True,
         include_sessions: bool = True,
         include_superseded: bool = False,
+        collections: list[dict] | None = None,
     ) -> list[Evidence]:
         await self._ensure_database_ready()
         over_fetch = min(max(top_k * 8, 120), 200)
@@ -573,6 +651,12 @@ class HydraDBStore(MemoryStore):
             recency_bias=0.4,
             graph_context=True,
         )
+        if collections:  # multi-corpus pull: query the weighted collection set
+            kwargs.pop("collection")  # SDK: do not send collection + collections together
+            kwargs["collections"] = {
+                str(c.get("name") or self._collection(question_id)): float(c.get("weight") or 1.0)
+                for c in collections
+            }
         if include_facts and not include_sessions:
             kwargs["metadata_filters"] = {"kind": "fact"}
         elif include_sessions and not include_facts:

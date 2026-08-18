@@ -266,6 +266,7 @@ class AsyncMemory:
         top_k: int = 20,
         use_gate: bool = False,
         ids_path: str | None = None,
+        webhook_tracker: Any | None = None,
     ):
         self._store_backend = store
         self._store_path = store_path
@@ -279,6 +280,7 @@ class AsyncMemory:
         self._quality_min_score = quality_min_score
         self._top_k = top_k
         self._use_gate = use_gate
+        self._webhook_tracker = webhook_tracker
         self._settings = Settings()
 
         self._store: MemoryStore | None = None
@@ -313,6 +315,7 @@ class AsyncMemory:
                     key,
                     database=self._database or s.hydra_db_database,
                     base_url=self._base_url or s.hydra_db_base_url,
+                    webhook_tracker=self._webhook_tracker,
                 )
             else:
                 from hydrous.store.local import LocalMemoryStore
@@ -355,6 +358,17 @@ class AsyncMemory:
         for name, value in params.items():
             if value not in (None, False, {}, []):
                 log.info("%s: %r accepted — not implemented yet (fed back to hydrous)", name, value)
+
+    @staticmethod
+    def _collection_bucket(question_id: str, name: str) -> str:
+        """Friendly multi-corpus collection name -> store bucket:
+        "memory"/"base" -> the scope bucket, "knowledge" -> its _knowledge
+        bucket; raw bucket names pass through verbatim."""
+        if name in ("memory", "base"):
+            return question_id
+        if name == "knowledge":
+            return f"{question_id}_knowledge"
+        return name
 
     def _find_scope(self, memory_id: str) -> str | None:
         return self._registry.get(memory_id)
@@ -495,6 +509,41 @@ class AsyncMemory:
             "metadata": {"from_search": True},
         }
 
+    async def add_knowledge(
+        self,
+        documents: Any,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict:
+        """Add RAG-corpus documents (hydrous extension — mem0 has no knowledge
+        corpus). Stored in the scope's `_knowledge` bucket on the SAME database;
+        retrieve them with `search(..., collections=[{"name": "knowledge", ...}])`.
+        `documents`: a string, a list of strings, or a list of {"text": ...}."""
+        scope = _Scope(user_id=user_id, agent_id=agent_id, run_id=run_id, what="add_knowledge")
+        self._scopes.add(scope.question_id)
+        if isinstance(documents, str):
+            docs: list[dict] = [{"text": documents}]
+        elif isinstance(documents, list):
+            docs = [
+                {"text": d.get("text") if isinstance(d, dict) else str(d)}
+                for d in documents
+            ]
+        else:
+            raise ValueError("documents must be a string or a list of text / {\"text\": ...} dicts")
+        store = await self._ensure_store()
+        ids = await store.add_knowledge(scope.question_id, docs)
+        for sid in ids:
+            self._registry.set(sid, scope.question_id, scope.ids)
+        return {
+            "results": [
+                {"id": sid, "memory": str(doc.get("text") or ""), "event": "ADD",
+                 "metadata": {"kind": "knowledge"}}
+                for sid, doc in zip(ids, docs, strict=False)
+            ]
+        }
+
     # ------------------------------------------------------------ search
 
     async def search(
@@ -508,13 +557,20 @@ class AsyncMemory:
         explain: bool = False,
         reference_date: Any = None,
         show_expired: bool = False,
+        collections: list[dict] | None = None,
         **kwargs: Any,
     ) -> dict:
         """Hybrid search. `reference_date` is implemented time-travel (as-of);
         `rerank`/`categories` (kwargs) are accepted and logged; `explain` adds
         `score_details` with the raw RRF score. Scores are rank-normalized to
         [0, 1]; `threshold` floors them. Results are tagged so re-`add`ing them
-        is a NOOP."""
+        is a NOOP.
+
+        `collections` (hydrous extension, not mem0): multi-corpus weighted search
+        across the memory bucket and RAG corpora —
+        [{"name": "knowledge", "weight": 0.3}] pulls the scope's `_knowledge`
+        bucket at 0.3x alongside the default memory bucket ("memory" or the raw
+        bucket name). No `collections` = memory bucket only."""
         if not query or not str(query).strip():
             raise ValueError("query must be a non-empty string")
         if int(top_k) <= 0:
@@ -535,12 +591,22 @@ class AsyncMemory:
 
         store = await self._ensure_store()
         as_of = _date_part(reference_date) or None  # reference_date = as-of time travel
+        search_kwargs: dict = {}
+        if collections:
+            search_kwargs["collections"] = [
+                {
+                    "name": self._collection_bucket(scope.question_id, str(c.get("name") or "memory")),
+                    "weight": float(c["weight"]) if c.get("weight") is not None else 1.0,
+                }
+                for c in collections
+            ]
         evs = await store.search(
             scope.question_id,
             str(query).strip(),
             as_of_date=as_of,
             top_k=max(int(top_k), 1),
             include_superseded=False,
+            **search_kwargs,
         )
         if not evs:
             return {"results": []}
@@ -833,7 +899,9 @@ class AsyncMemory:
     ) -> dict:
         """Delete every memory in one scope (mem0 signature: top-level entity ids)."""
         scope = _Scope(user_id=user_id, agent_id=agent_id, run_id=run_id, what="delete_all")
-        await (await self._ensure_store()).delete_question(scope.question_id)
+        store = await self._ensure_store()
+        await store.delete_question(scope.question_id)
+        await store.delete_question(f"{scope.question_id}_knowledge")  # RAG corpus too
         self._scopes.discard(scope.question_id)
         removed = self._registry.drop_scope(scope.question_id)
         self._seen = {h: i for h, i in self._seen.items() if i not in removed}
@@ -847,6 +915,7 @@ class AsyncMemory:
         scopes = self._scopes | self._registry.scopes()
         for qid in scopes:
             await store.delete_question(qid)
+            await store.delete_question(f"{qid}_knowledge")  # RAG corpus too
         self._seen.clear()
         self._registry.clear()
         self._scopes.clear()
@@ -943,6 +1012,19 @@ class AsyncMemory:
             stats["imported"] += len(facts)
         return {"scopes": sorted(self._scopes), **stats}
 
+    async def register_indexing_webhook(
+        self, url: str, *, signing_secret: str | None = None
+    ) -> None:
+        """Subscribe the HydraDB API key's org to `indexing.status_changed`.
+
+        Requires `store="hydradb"` and a PUBLIC callback URL (e.g. a tunnel to
+        `hydra-mem serve`). Webhooks mark the shared IndexingTracker so ingests
+        stop polling."""
+        store = await self._ensure_store()
+        if not hasattr(store, "register_indexing_webhook"):
+            raise RuntimeError("webhook registration requires store='hydradb'")
+        await store.register_indexing_webhook(url, signing_secret=signing_secret)
+
     async def close(self) -> None:
         """Release the underlying store (sqlite connection / cloud client)."""
         store, self._store = self._store, None
@@ -988,6 +1070,9 @@ class Memory:
     def search(self, query: str, **kwargs: Any) -> dict:
         return self._run(self._async.search(query, **kwargs))
 
+    def add_knowledge(self, documents: Any, **kwargs: Any) -> dict:
+        return self._run(self._async.add_knowledge(documents, **kwargs))
+
     def get_all(self, **kwargs: Any) -> dict:
         return self._run(self._async.get_all(**kwargs))
 
@@ -1016,6 +1101,9 @@ class Memory:
 
     def import_mem0(self, items: list[dict], **kwargs: Any) -> dict:
         return self._run(self._async.import_mem0(items, **kwargs))
+
+    def register_indexing_webhook(self, url: str, *, signing_secret: str | None = None) -> None:
+        return self._run(self._async.register_indexing_webhook(url, signing_secret=signing_secret))
 
     def close(self) -> None:
         if self._closed:

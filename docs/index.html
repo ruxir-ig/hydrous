@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hydrous — append-only bi-temporal agent memory</title>
+<meta name="description" content="mem0's API, none of mem0's amnesia: append-only bi-temporal memory with provenance, abstention, and graph retrieval on a single engine.">
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #2f81f7; --good: #3fb950; --bad: #f85149;
+    --code: #1f242d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 2.2rem; margin: 0 0 4px; }
+  h2 { font-size: 1.4rem; margin-top: 48px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 1.05rem; margin-top: 28px; }
+  .tagline { color: var(--muted); font-size: 1.05rem; margin-bottom: 24px; }
+  code { background: var(--code); border: 1px solid var(--border); border-radius: 4px;
+         padding: 1px 5px; font-size: .92em; }
+  pre { background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+        padding: 14px 16px; overflow-x: auto; font-size: .9rem; line-height: 1.5; }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: .94rem; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); }
+  .chip { display: inline-block; border: 1px solid var(--border); border-radius: 999px;
+          padding: 1px 10px; font-size: .8rem; color: var(--muted); margin-right: 6px; }
+  .good { color: var(--good); } .bad { color: var(--bad); }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .muted { color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h3 { margin-top: 0; }
+  footer { color: var(--muted); font-size: .88rem; margin-top: 64px; border-top: 1px solid var(--border); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hydrous</h1>
+  <div class="tagline">
+    <span class="chip">AGPL-3.0</span>
+    <span class="chip">Python</span><span class="chip">TypeScript SDK</span><span class="chip">HydraDB optional</span>
+  </div>
+  <p class="tagline"><strong>mem0&rsquo;s API, none of mem0&rsquo;s amnesia</strong> — append-only
+  bi-temporal memory with provenance, abstention, and graph retrieval, on a single
+  engine instead of Qdrant+Neo4j+Postgres glue.</p>
+
+  <nav class="muted">
+    <a href="#pitch">Pitch</a> · <a href="#quickstart">Quickstart</a> ·
+    <a href="#api">API</a> · <a href="#comparison">Comparison</a> ·
+    <a href="#demos">Demos</a> · <a href="#architecture">Architecture</a>
+  </nav>
+
+  <h2 id="pitch">The pitch</h2>
+  <table>
+    <tr><th>mem0 OSS</th><th>Hydrous</th></tr>
+    <tr><td>Flat strings; a newer fact is a new row, the old one still searched as current</td>
+        <td>Bi-temporal facts; supersession closes <code>valid_to</code> (PATCH, stable id); old versions stay retrievable</td></tr>
+    <tr><td>Known junk-extraction problem (&ldquo;98% junk&rdquo;, issue #4573)</td>
+        <td>Quality gate: every fact scored (<code>confidence</code>), junk REJECTed before storage, score kept in metadata</td></tr>
+    <tr><td>Re-adding search results duplicates memory</td>
+        <td>Feedback-loop prevention: search results tagged, re-<code>add</code> is a NOOP</td></tr>
+    <tr><td><code>search(reference_date=...)</code> raises &ldquo;platform-only&rdquo;</td>
+        <td><code>reference_date</code> works: true as-of time travel</td></tr>
+    <tr><td><code>chat()</code> raises <code>NotImplementedError</code></td>
+        <td><code>chat()</code> retrieves + reads and abstains verbatim when evidence is missing — no hallucination</td></tr>
+    <tr><td>No multi-hop</td><td>HydraDB <code>graph_context</code> lanes merged into evidence</td></tr>
+    <tr><td>No RAG corpus</td><td>Multi-corpus <code>type="memory"|"knowledge"</code> with per-scope <code>collections</code> weighting — RAG + memory in one database</td></tr>
+    <tr><td>No migration path</td><td><code>hydra-mem import-mem0</code> replays a <code>get_all</code> export, <code>created_at → recorded_at</code></td></tr>
+  </table>
+
+  <h2 id="quickstart">Quickstart</h2>
+  <pre><code>uv sync                     # python: hydrous engine + hydra_mem compat facade
+cp .env.example .env        # add your LLM key (or use MockLLM / --mock)
+
+# mem0 drop-in, local store:
+uv run python -c "
+from hydra_mem import Memory
+m = Memory()
+m.add('I love hiking on weekends', user_id='alice')
+print(m.search('hiking', filters={'user_id': 'alice'}))
+"
+
+# HTTP bridge (the TS SDK's backend) + 4 positioning demos (offline):
+.venv/bin/hydra-mem serve --mock --port 8765   # in another terminal
+.venv/bin/hydra-mem demo</code></pre>
+
+  <h2 id="api">API</h2>
+  <h3>Python — mem0-compatible</h3>
+  <pre><code>from hydra_mem import Memory          # or AsyncMemory
+
+m = Memory(store="local")             # or Memory(store="hydradb", ...)
+m.add(msg, user_id=..., infer=False)  # raw fast path, no LLM
+m.search(q, filters={"user_id": "alice"}, reference_date="2024-01-01")
+m.get(memory_id)          # item | None (mem0 parity)
+m.history(memory_id)      # supersession chain (mem0 field names)
+m.update(memory_id, text=...); m.delete(memory_id); m.reset()
+m.chat(q, filters=...)    # abstains verbatim when evidence is missing
+m.add_knowledge(doc, user_id=...)        # RAG corpus (extension)
+m.search(q, filters=..., collections=[{"name": "knowledge", "weight": 0.5}])</code></pre>
+  <h3>TypeScript — hydrous-ts</h3>
+  <pre><code>import { Memory } from "hydrous-ts";
+const m = new Memory({ baseUrl: "http://127.0.0.1:8765" });
+await m.add("I love hiking", { user_id: "alice" });
+const hits = await m.search("hiking", { filters: { user_id: "alice" } });</code></pre>
+  <h3>HTTP — <code>hydra-mem serve</code></h3>
+  <p class="muted">POST /add /search /get_all /update /delete /delete_all /reset /chat /
+  add_knowledge /import-mem0 · GET /get/{id} /history/{id} ·
+  POST /webhooks/hydradb/indexing (webhook-driven indexing) · GET /health</p>
+
+  <h2 id="comparison">Comparison</h2>
+  <table>
+    <tr><th>System</th><th>LongMemEval</th><th>Notes</th></tr>
+    <tr><td>GPT-4o full history (baseline)</td><td>60.6%</td><td>LongMemEval&rsquo;s published baseline</td></tr>
+    <tr><td>Oracle evidence</td><td>87.0%</td><td>retrieval ceiling</td></tr>
+    <tr><td>mem0 managed platform (Apr 2026)</td><td>94.4</td><td>their protocol; proprietary optimizations; not 1:1 comparable</td></tr>
+    <tr><td><strong>Hydrous</strong></td><td class="muted">full run pending</td>
+        <td>pilot subsets: local 66.7% (3 ids) / 60% (5 ids), HydraDB 33.3% (3 ids).
+        Full 500 run started, paused on endpoint 504s. <a href="comparison.md">methodology</a></td></tr>
+  </table>
+
+  <h2 id="demos">Demos mem0 structurally cannot do</h2>
+  <div class="grid">
+    <div class="card"><h3>1 · &ldquo;before&rdquo;</h3>
+      <p>Superseded facts answer <em>what laptop did I use before the MacBook?</em> — old versions stay retrievable.</p></div>
+    <div class="card"><h3>2 · time travel</h3>
+      <p><code>reference_date="2024-01-01"</code> returns the state valid <em>then</em>. mem0 OSS raises &ldquo;platform-only&rdquo;.</p></div>
+    <div class="card"><h3>3 · abstention</h3>
+      <p>No evidence → the exact abstention string, never a hallucination.</p></div>
+    <div class="card"><h3>4 · multi-hop graph</h3>
+      <p>HydraDB <code>graph_context</code> lanes surface scored path contexts — retrieval across fact chains.</p></div>
+  </div>
+  <pre><code>.venv/bin/hydra-mem demo        # all four, offline (mock LLM)</code></pre>
+
+  <h2 id="architecture">Architecture &amp; docs</h2>
+  <ul>
+    <li><a href="../ARCHITECTURE.md">ARCHITECTURE.md</a> — the single living doc (design, algorithms, status, handoff notes)</li>
+    <li><a href="comparison.md">comparison.md</a> — benchmark methodology + citations</li>
+    <li><a href="../RUN_NOTES.md">RUN_NOTES.md</a> — HydraDB probe findings, quota math, eval history</li>
+    <li><a href="../README.md">README.md</a> — repo quickstart + licensing notes</li>
+  </ul>
+
+  <footer>
+    License: AGPL-3.0. mem0&rsquo;s OSS is Apache-2.0 — check copyleft obligations before
+    vendoring Hydrous as a drop-in in closed-source products.
+  </footer>
+</main>
+</body>
+</html>

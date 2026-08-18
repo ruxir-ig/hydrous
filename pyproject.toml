@@ -1,9 +1,23 @@
 [project]
 name = "hydrous"
 version = "0.1.0"
-description = "Hydrous: agent memory layer for cross-session continuity"
+description = "mem0-compatible agent memory layer: append-only bi-temporal facts, abstention, graph retrieval — one engine instead of Qdrant+Neo4j+Postgres glue"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+keywords = ["memory", "agent", "mem0", "llm", "bi-temporal", "rag", "longmemeval"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+]
 dependencies = [
     "openai>=1.50",
     "pydantic>=2.7",

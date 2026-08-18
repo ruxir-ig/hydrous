@@ -19,6 +19,13 @@ class MemoryStore(ABC):
     async def add_facts(self, question_id: str, facts: list[Fact]) -> None: ...
 
     @abstractmethod
+    async def add_knowledge(self, question_id: str, documents: list[dict]) -> list[str]:
+        """Add knowledge documents — the RAG segment of the unified multi-corpus
+        story (memory lives in the base bucket, knowledge in the
+        `{question_id}_knowledge` bucket). Each document: {"text": str, ...}.
+        Returns the stored document ids."""
+
+    @abstractmethod
     async def update_fact(self, fact: Fact) -> None:
         """Persist validity-interval changes (valid_to / superseded_by). Never deletes."""
 
@@ -37,10 +44,16 @@ class MemoryStore(ABC):
         include_facts: bool = True,
         include_sessions: bool = True,
         include_superseded: bool = False,
+        collections: list[dict] | None = None,
     ) -> list[Evidence]:
         """Hybrid search scoped to one question. Facts must satisfy
         `valid_as_of(as_of_date)` unless include_superseded is set (used for
-        'what did I previously think' questions). Sessions are always eligible."""
+        'what did I previously think' questions). Sessions are always eligible.
+
+        `collections`: optional multi-corpus weighting — e.g.
+        [{"name": "qid_x", "weight": 0.7}, {"name": "qid_x_knowledge", "weight": 0.3}].
+        Each named bucket is searched with its own lane ranks; the weight scales
+        its scores before the final merge (RAG + memory in one database)."""
 
     @abstractmethod
     async def get_facts(self, question_id: str) -> list[Fact]: ...

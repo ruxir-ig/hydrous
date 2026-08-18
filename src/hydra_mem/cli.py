@@ -37,8 +37,9 @@ def _memory(
     mock: bool = False,
     store_path: Path | None = None,
     embedder: Any | None = None,
+    **extra: Any,
 ) -> Memory:
-    kwargs: dict = {"store": store}
+    kwargs: dict = {"store": store, **extra}
     if store_path is not None:
         kwargs["store_path"] = str(store_path)
     if mock:
@@ -218,6 +219,69 @@ def demo_cmd(
                 f"   chat: {m.chat(q, filters={'user_id': f'{user_id}_graph'})}"
             )
     typer.echo(f"\ndemo done (scoped to {qid!r})")
+
+
+@app.command("webhook-register")
+def webhook_register_cmd(
+    url: str,
+    signing_secret: str | None = typer.Option(
+        None, "--signing-secret", help="Secret HydraDB signs payloads with (>=32 chars)"
+    ),
+    mock: bool = typer.Option(False, "--mock", help="Dry-run against MockLLM (no network)"),
+) -> None:
+    """Register the HydraDB `indexing.status_changed` webhook for the configured key.
+
+    Requires a PUBLIC url (tunneled `hydra-mem serve`) and HYDRA_DB_API_KEY."""
+    with _memory("hydradb", mock=mock) as m:
+        m.register_indexing_webhook(url, signing_secret=signing_secret)
+    typer.echo(f"registered: {url} -> ['indexing.status_changed']")
+
+
+@app.command("serve")
+def serve_cmd(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port"),
+    store: str = typer.Option("local", "--store", help="local | hydradb"),
+    store_path: Path | None = typer.Option(None, "--store-path", help="Local sqlite path"),
+    mock: bool = typer.Option(False, "--mock", help="Use MockLLM for extraction/chat"),
+    callback_url: str | None = typer.Option(
+        None,
+        "--callback-url",
+        help="Public callback URL to register for HydraDB indexing.status_changed webhooks",
+    ),
+    signing_secret: str | None = typer.Option(
+        None, "--signing-secret", help="Webhook signing secret (>=32 chars)"
+    ),
+) -> None:
+    """Serve the mem0-compatible API over HTTP (+ HydraDB indexing webhooks).
+
+    `hydra-mem serve --store hydradb --callback-url https://my-tunnel.example/...`
+    stops ingest polling: HydraDB POSTs indexing.status_changed to this server's
+    /webhooks/hydradb/indexing and the tracker wakes the store instead."""
+    from hydra_mem.indexing import IndexingTracker
+    from hydra_mem.server import build_server
+    from hydrous.config import Settings
+
+    tracker = IndexingTracker()
+    with _memory(store, mock=mock, store_path=store_path, webhook_tracker=tracker) as m:
+        database = Settings().hydra_db_database
+        if callback_url:
+            try:
+                m.register_indexing_webhook(callback_url, signing_secret=signing_secret)
+                typer.echo(f"webhook registered: {callback_url}")
+            except RuntimeError as e:
+                typer.secho(f"warning: {e}", fg=typer.colors.YELLOW, err=True)
+        server = build_server(m, host=host, port=port, tracker=tracker, database=database)
+        typer.echo(
+            f"hydra-mem serving on http://{host}:{port} "
+            f"(store={store}, webhooks={'on' if callback_url else 'off'}) — Ctrl+C to stop"
+        )
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            typer.echo("\nstopped")
+        finally:
+            server.server_close()
 
 
 if __name__ == "__main__":
