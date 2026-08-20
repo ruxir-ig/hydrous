@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hydrous — Bi-Temporal Agent Memory Playground</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #07090e;
+      --panel-bg: rgba(16, 22, 34, 0.75);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      --panel-border-glow: rgba(56, 189, 248, 0.25);
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      
+      --accent-cyan: #38bdf8;
+      --accent-emerald: #10b981;
+      --accent-emerald-glow: rgba(16, 185, 129, 0.25);
+      --accent-amber: #f59e0b;
+      --accent-amber-glow: rgba(245, 158, 11, 0.25);
+      --accent-rose: #f43f5e;
+      --accent-purple: #a855f7;
+
+      --font-display: 'Syne', sans-serif;
+      --font-body: 'Outfit', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-body);
+      min-height: 100vh;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.04) 0%, transparent 40%),
+        radial-gradient(circle at 85% 85%, rgba(16, 185, 129, 0.04) 0%, transparent 40%),
+        linear-gradient(to right, rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+    }
+
+    /* Top Nav */
+    header {
+      height: 64px;
+      border-bottom: 1px solid var(--panel-border);
+      background: rgba(7, 9, 14, 0.85);
+      backdrop-filter: blur(12px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-logo {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #0284c7, #10b981);
+      display: grid;
+      place-items: center;
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: 14px;
+      color: #fff;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.4);
+    }
+
+    .brand-title {
+      font-family: var(--font-display);
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #fff;
+    }
+
+    .brand-tag {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--accent-cyan);
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      padding: 2px 8px;
+      border-radius: 6px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      background: rgba(16, 185, 129, 0.1);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      background: #10b981;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #10b981;
+      animation: pulse 2s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    .btn {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 7px;
+      border: 1px solid var(--panel-border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      border-color: rgba(56, 189, 248, 0.4);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(2, 132, 199, 0.3);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #0369a1, #075985);
+      box-shadow: 0 4px 12px rgba(2, 132, 199, 0.4);
+    }
+
+    /* Main Container */
+    main {
+      padding: 20px 24px 60px;
+      display: grid;
+      grid-template-columns: 340px 1fr 380px;
+      gap: 20px;
+      height: calc(100vh - 64px);
+      max-width: 1700px;
+      margin: 0 auto;
+    }
+
+    @media (max-width: 1280px) {
+      main {
+        grid-template-columns: 300px 1fr;
+        height: auto;
+      }
+      .right-panel {
+        grid-column: span 2;
+      }
+    }
+
+    @media (max-width: 860px) {
+      main {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .right-panel {
+        grid-column: span 1;
+      }
+    }
+
+    /* Panels */
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 16px;
+      backdrop-filter: blur(16px);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--panel-border);
+      padding-bottom: 10px;
+    }
+
+    .panel-title {
+      font-family: var(--font-display);
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .panel-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+    }
+
+    /* Left Panel Controls */
+    .demo-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .demo-card:hover {
+      background: rgba(56, 189, 248, 0.05);
+      border-color: rgba(56, 189, 248, 0.3);
+      transform: translateY(-1px);
+    }
+
+    .demo-card.active {
+      background: rgba(56, 189, 248, 0.08);
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
+    }
+
+    .demo-tag {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--accent-cyan);
+      font-weight: 600;
+      margin-bottom: 3px;
+    }
+
+    .demo-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 3px;
+    }
+
+    .demo-desc {
+      font-size: 0.74rem;
+      color: var(--text-muted);
+      line-height: 1.35;
+    }
+
+    .input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .input-label {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    input[type="text"], textarea {
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 0.82rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input[type="text"]:focus, textarea:focus {
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.2);
+    }
+
+    /* Graph Canvas (Center) */
+    .graph-panel {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .graph-header {
+      padding: 14px 18px;
+      background: rgba(16, 22, 34, 0.85);
+      border-bottom: 1px solid var(--panel-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 10;
+    }
+
+    #graph-svg-container {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      min-height: 380px;
+      position: relative;
+      background: radial-gradient(circle at 50% 50%, rgba(16, 24, 39, 0.5) 0%, rgba(7, 9, 14, 0.9) 100%);
+    }
+
+    svg.graph-svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Timeline Slider Bar */
+    .timeline-bar {
+      padding: 14px 20px;
+      background: rgba(16, 22, 34, 0.95);
+      border-top: 1px solid var(--panel-border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 10;
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+    }
+
+    .slider-date-pill {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      outline: none;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+      cursor: pointer;
+      box-shadow: 0 0 10px var(--accent-cyan);
+      border: 2px solid #fff;
+    }
+
+    /* Right Panel (Cypher & Results) */
+    .cypher-box {
+      background: #04060a;
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      color: #93c5fd;
+      line-height: 1.45;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      position: relative;
+    }
+
+    .cypher-badge {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .answer-card {
+      background: rgba(16, 185, 129, 0.05);
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .answer-card.abstain {
+      background: rgba(244, 63, 94, 0.06);
+      border-color: rgba(244, 63, 94, 0.35);
+    }
+
+    .answer-title {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: #34d399;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .answer-card.abstain .answer-title {
+      color: #fb7185;
+    }
+
+    .answer-text {
+      font-size: 0.86rem;
+      font-weight: 500;
+      color: #fff;
+      line-height: 1.4;
+    }
+
+    .result-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .result-item {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 0.76rem;
+    }
+
+    .result-score {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--accent-cyan);
+      margin-right: 6px;
+    }
+
+    /* Modal for MCP Config */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(6px);
+      display: none;
+      place-items: center;
+      z-index: 100;
+    }
+
+    .modal {
+      background: #0f172a;
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      width: 90%;
+      max-width: 580px;
+      padding: 20px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-logo">H</div>
+      <div>
+        <div class="brand-title">Hydrous Playground</div>
+      </div>
+      <span class="brand-tag">HydraDB OSS</span>
+    </div>
+    <div class="header-actions">
+      <div class="status-badge">
+        <span class="status-dot"></span>
+        <span id="engine-status">checking store</span>
+      </div>
+      <button class="btn" onclick="openMcpModal()">MCP Config</button>
+      <button class="btn btn-primary" onclick="resetAndSeed()">Reset & Seed</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Column: Demos & Actions -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Interactive Demos</span>
+        <span class="panel-subtitle">Bi-temporal memory graph</span>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px; overflow-y: auto;">
+        <div class="demo-card active" id="demo-card-1" onclick="runDemo(1)">
+          <div class="demo-tag">DEMO 1 · SUPERSEDED FACTS</div>
+          <div class="demo-title">Laptop Supersession (Dell → Mac)</div>
+          <div class="demo-desc">Answers <i>"what did I use before?"</i> from closed validity intervals.</div>
+        </div>
+
+        <div class="demo-card" id="demo-card-2" onclick="runDemo(2)">
+          <div class="demo-tag">DEMO 2 · TIME TRAVEL</div>
+          <div class="demo-title">As-Of 2024 State Query</div>
+          <div class="demo-desc">Point-in-time retrieval over validity intervals via OpenCypher as-of.</div>
+        </div>
+
+        <div class="demo-card" id="demo-card-3" onclick="runDemo(3)">
+          <div class="demo-tag">DEMO 3 · SAFE ABSTENTION</div>
+          <div class="demo-title">Missing Breakfast Abstention</div>
+          <div class="demo-desc">Returns verbatim official abstention string without hallucinating.</div>
+        </div>
+
+        <div class="demo-card" id="demo-card-4" onclick="runDemo(4)">
+          <div class="demo-tag">DEMO 4 · MULTI-HOP GRAPH</div>
+          <div class="demo-title">Sister's City Path Traversal</div>
+          <div class="demo-desc">Traverses <code>user → Anna → London</code> via OpenCypher paths.</div>
+        </div>
+      </div>
+
+      <div class="input-group" style="margin-top: auto; border-top: 1px solid var(--panel-border); padding-top: 12px;">
+        <div class="input-label">
+          <span>Natural Language Query</span>
+          <span style="color: var(--accent-cyan)">chat API</span>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <input type="text" id="custom-query" placeholder="Ask memory or test abstention..." style="flex: 1;">
+          <button class="btn btn-primary" onclick="sendCustomQuery()">Ask</button>
+        </div>
+      </div>
+
+      <div class="input-group">
+        <div class="input-label">
+          <span>Add Custom Memory</span>
+          <span style="color: var(--accent-emerald)">Quality Gated</span>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <input type="text" id="custom-memory" placeholder="e.g. Alice switched to Rust in June..." style="flex: 1;">
+          <button class="btn" onclick="addCustomMemory()">+ Add</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Column: Graph Visualizer & Time-Travel Slider -->
+    <div class="panel graph-panel">
+      <div class="graph-header">
+        <div>
+          <span class="panel-title">Bi-Temporal Memory Graph</span>
+          <span class="panel-subtitle" id="graph-meta">4 entities · 4 versioned edges</span>
+        </div>
+        <div style="display: flex; gap: 10px; font-family: var(--font-mono); font-size: 0.72rem;">
+          <span style="color: var(--accent-emerald)">● Active Edge</span>
+          <span style="color: var(--accent-amber)">● Superseded Edge</span>
+        </div>
+      </div>
+
+      <div id="graph-svg-container">
+        <svg class="graph-svg" id="graph-svg" viewBox="0 0 800 500"></svg>
+      </div>
+
+      <div class="timeline-bar">
+        <div class="slider-header">
+          <span>⏳ As-Of Time-Travel Exploration</span>
+          <span class="slider-date-pill" id="slider-date-label">2026-08-20 (Current)</span>
+        </div>
+        <input type="range" id="time-slider" min="0" max="100" value="100" oninput="onSliderChange(this.value)">
+        <div style="display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-dim);">
+          <span>2023-01-01</span>
+          <span>2024-01-01</span>
+          <span>2024-03-15 (Switch)</span>
+          <span>Current (2026)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Cypher Inspector & Evidence -->
+    <div class="panel right-panel">
+      <div class="panel-header">
+        <span class="panel-title">HydraDB OSS Inspector</span>
+        <span class="panel-subtitle">OpenCypher Wire</span>
+      </div>
+
+      <div class="input-group">
+        <div class="input-label">Generated OpenCypher Query</div>
+        <div class="cypher-box" id="cypher-code">// Click any demo on the left to inspect the Cypher query
+MATCH (start:Fact)-[:SUPERSEDED_BY*1..4]->(fact:Fact)
+RETURN fact</div>
+      </div>
+
+      <div class="answer-card" id="answer-card">
+        <div class="answer-title" id="answer-title">⚡ Reader Output</div>
+        <div class="answer-text" id="answer-text">Select a demo to run retrieval and reasoning.</div>
+      </div>
+
+      <div class="input-group" style="flex: 1; min-height: 0;">
+        <div class="input-label">Retrieved Evidence Pack</div>
+        <div class="result-list" id="evidence-list">
+          <div class="result-item">No search performed yet.</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- MCP Modal -->
+  <div class="modal-backdrop" id="mcp-modal" onclick="if(event.target === this) closeMcpModal()">
+    <div class="modal">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h3 style="font-family: var(--font-display); font-size: 1.1rem; color: #fff;">Connect Hydrous via MCP</h3>
+        <button class="btn" onclick="closeMcpModal()">✕</button>
+      </div>
+      <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 14px;">
+        Add this configuration to your <code>claude_desktop_config.json</code> or Cursor MCP settings to carry context across Claude, Cursor, Windsurf, and Cline:
+      </p>
+      <div class="cypher-box" id="mcp-json" style="color: #6ee7b7; max-height: 220px;">{
+  "mcpServers": {
+    "hydrous": {
+      "command": "uv",
+      "args": ["run", "hydrous", "mcp", "--user-id", "demo"]
+    }
+  }
+}</div>
+      <div style="display: flex; justify-content: flex-end; margin-top: 14px;">
+        <button class="btn btn-primary" onclick="navigator.clipboard.writeText(document.getElementById('mcp-json').innerText); alert('Copied MCP configuration to clipboard!')">Copy Config</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentGraph = null;
+    const dates = [
+      "2023-01-01", "2023-06-01", "2024-01-01", "2024-03-14", "2024-03-15", "2025-01-01", "2026-08-20"
+    ];
+
+    async function init() {
+      await refreshStatus();
+      await runDemo(1);
+    }
+
+    async function refreshStatus() {
+      try {
+        const resp = await fetch('/api/status');
+        const data = await resp.json();
+        const el = document.getElementById('engine-status');
+        if (el) el.textContent = data.engine || data.store || 'online';
+      } catch (_err) {
+        const el = document.getElementById('engine-status');
+        if (el) el.textContent = 'server unreachable';
+      }
+    }
+
+    async function runDemo(demoId) {
+      document.querySelectorAll('.demo-card').forEach(c => c.classList.remove('active'));
+      const activeCard = document.getElementById(`demo-card-${demoId}`);
+      if (activeCard) activeCard.classList.add('active');
+
+      try {
+        const resp = await fetch('/api/demos/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ demo_id: demoId, user_id: 'demo' })
+        });
+        const data = await resp.json();
+        renderResults(data);
+      } catch (err) {
+        console.error("Demo failed:", err);
+      }
+    }
+
+    function renderResults(data) {
+      document.getElementById('cypher-code').innerText = data.cypher || '// No Cypher for this query';
+      
+      const ansCard = document.getElementById('answer-card');
+      const ansTitle = document.getElementById('answer-title');
+      const ansText = document.getElementById('answer-text');
+
+      if (data.is_abstention) {
+        ansCard.className = 'answer-card abstain';
+        ansTitle.innerHTML = '🛡️ First-Class Safe Abstention (Zero-Hallucination)';
+        ansText.innerText = data.chat_answer;
+      } else {
+        ansCard.className = 'answer-card';
+        ansTitle.innerHTML = '⚡ Grounded Reader Answer';
+        ansText.innerText = data.chat_answer;
+      }
+
+      // Evidence
+      const list = document.getElementById('evidence-list');
+      list.innerHTML = '';
+      if (data.search_results && data.search_results.length > 0) {
+        data.search_results.forEach(r => {
+          const item = document.createElement('div');
+          item.className = 'result-item';
+          const score = (r.score !== undefined) ? r.score.toFixed(3) : '1.000';
+          item.innerHTML = `<span class="result-score">[${score}]</span> ${r.memory || r.text || JSON.stringify(r)}`;
+          list.appendChild(item);
+        });
+      } else {
+        list.innerHTML = '<div class="result-item" style="color: var(--text-dim)">No matching evidence found.</div>';
+      }
+
+      if (data.graph) {
+        currentGraph = data.graph;
+        renderGraph(data.graph, document.getElementById('slider-date-label').innerText.split(' ')[0]);
+      }
+    }
+
+    const DEMO_POSITIONS = {
+      'entity:user': { x: 180, y: 220, label: 'User', color: '#38bdf8' },
+      'entity:Dell XPS 13': { x: 460, y: 120, label: 'Dell XPS 13', color: '#f59e0b' },
+      'entity:MacBook Pro': { x: 620, y: 120, label: 'MacBook Pro', color: '#10b981' },
+      'entity:Anna': { x: 380, y: 340, label: 'Anna', color: '#a855f7' },
+      'entity:London': { x: 620, y: 340, label: 'London', color: '#10b981' }
+    };
+
+    function layoutNodes(graph) {
+      const positions = {};
+      const entities = graph.entities || [];
+      const extras = [];
+      entities.forEach((e) => {
+        const id = e.id || ('entity:' + e.name);
+        if (DEMO_POSITIONS[id]) {
+          positions[id] = Object.assign({}, DEMO_POSITIONS[id], {
+            label: e.name === 'user' ? 'User' : e.name
+          });
+        } else {
+          extras.push(e);
+        }
+      });
+      extras.forEach((e, i) => {
+        const id = e.id || ('entity:' + e.name);
+        const n = Math.max(extras.length, 1);
+        const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+        positions[id] = {
+          x: 400 + 220 * Math.cos(angle),
+          y: 230 + 150 * Math.sin(angle),
+          label: e.name,
+          color: '#94a3b8'
+        };
+      });
+      if (Object.keys(positions).length === 0) {
+        return Object.assign({}, DEMO_POSITIONS);
+      }
+      return positions;
+    }
+
+    function renderGraph(graph, asOfDate = "2026-08-20") {
+      const svg = document.getElementById('graph-svg');
+      svg.innerHTML = '';
+
+      const edges = graph.edges || [];
+      const positions = layoutNodes(graph);
+
+      edges.forEach(e => {
+        const src = positions[e.source];
+        const tgt = positions[e.target];
+        if (!src || !tgt) return;
+
+        const isSupersession = e.type === 'supersession';
+        let strokeColor = '#10b981';
+        let strokeDash = 'none';
+
+        const validFrom = e.valid_from || '1970-01-01';
+        const validTo = e.valid_to || '9999-12-31';
+        const isCurrentlyValid = (asOfDate >= validFrom && asOfDate < validTo);
+
+        if (isSupersession) {
+          strokeColor = '#f59e0b';
+          strokeDash = '4 4';
+        } else if (!isCurrentlyValid) {
+          strokeColor = 'rgba(245, 158, 11, 0.4)';
+          strokeDash = '3 3';
+        }
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const cx = (src.x + tgt.x) / 2, cy = (src.y + tgt.y) / 2 - (isSupersession ? 25 : 0);
+        path.setAttribute('d', `M ${src.x} ${src.y} Q ${cx} ${cy} ${tgt.x} ${tgt.y}`);
+        path.setAttribute('stroke', strokeColor);
+        path.setAttribute('stroke-width', isCurrentlyValid || isSupersession ? '2.5' : '1.5');
+        path.setAttribute('stroke-dasharray', strokeDash);
+        path.setAttribute('fill', 'none');
+        svg.appendChild(path);
+
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', cx);
+        text.setAttribute('y', cy - 6);
+        text.setAttribute('fill', strokeColor);
+        text.setAttribute('font-family', 'JetBrains Mono');
+        text.setAttribute('font-size', '10px');
+        text.setAttribute('text-anchor', 'middle');
+        text.textContent = e.label;
+        svg.appendChild(text);
+      });
+
+      Object.entries(positions).forEach(([_id, pos]) => {
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('transform', `translate(${pos.x}, ${pos.y})`);
+
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('r', '24');
+        circle.setAttribute('fill', '#0f172a');
+        circle.setAttribute('stroke', pos.color);
+        circle.setAttribute('stroke-width', '2.5');
+        g.appendChild(circle);
+
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('y', '36');
+        text.setAttribute('fill', '#f1f5f9');
+        text.setAttribute('font-family', 'Outfit');
+        text.setAttribute('font-weight', '600');
+        text.setAttribute('font-size', '12px');
+        text.setAttribute('text-anchor', 'middle');
+        text.textContent = pos.label;
+        g.appendChild(text);
+
+        svg.appendChild(g);
+      });
+
+      document.getElementById('graph-meta').innerText =
+        `${Object.keys(positions).length} entities · ${edges.length} graph edges`;
+    }
+
+    function onSliderChange(val) {
+      const idx = Math.min(Math.floor((val / 100) * dates.length), dates.length - 1);
+      const date = dates[idx];
+      document.getElementById('slider-date-label').innerText = `${date}`;
+      if (currentGraph) {
+        renderGraph(currentGraph, date);
+      }
+    }
+
+    async function sendCustomQuery() {
+      const query = document.getElementById('custom-query').value.trim();
+      if (!query) return;
+
+      try {
+        const resp = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query, filters: { user_id: 'demo' } })
+        });
+        const answer = await resp.json();
+        const sResp = await fetch('/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query, filters: { user_id: 'demo' }, top_k: 3 })
+        });
+        const sData = await sResp.json();
+
+        renderResults({
+          query: query,
+          cypher: `MATCH (e:Entity)-[r:PREDICATE]->(v:Entity)\nWHERE r.question_id = 'mem0_u_demo'\nRETURN e.name, r.name, v.name`,
+          chat_answer: answer,
+          is_abstention: (answer.trim() === "I don't know. The chat history does not contain this information."),
+          search_results: sData.results || [],
+          graph: currentGraph
+        });
+      } catch (err) {
+        console.error("Custom query failed:", err);
+      }
+    }
+
+    async function addCustomMemory() {
+      const text = document.getElementById('custom-memory').value.trim();
+      if (!text) return;
+
+      await fetch('/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: text, user_id: 'demo', infer: true })
+      });
+      document.getElementById('custom-memory').value = '';
+      
+      const gResp = await fetch('/api/graph?user_id=demo');
+      const gData = await gResp.json();
+      currentGraph = gData;
+      renderGraph(gData);
+      alert('Memory added with quality gate scoring!');
+    }
+
+    async function resetAndSeed() {
+      await runDemo(1);
+    }
+
+    function openMcpModal() {
+      document.getElementById('mcp-modal').style.display = 'grid';
+    }
+
+    function closeMcpModal() {
+      document.getElementById('mcp-modal').style.display = 'none';
+    }
+
+    window.onload = init;
+  </script>
+</body>
+</html>

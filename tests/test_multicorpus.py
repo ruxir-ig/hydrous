@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from hydra_mem import Memory
-from hydra_mem.api import _Scope
+from hydrous import Memory
 from hydrous.embeddings import TfidfEmbedder
 from hydrous.llm import MockLLM
+from hydrous.mem0 import AsyncMemory, _Scope
 from hydrous.schema import Fact
 from hydrous.store.local import LocalMemoryStore
 
@@ -28,8 +28,6 @@ def mem(tmp_path) -> Memory:
 
 
 def test_collection_bucket_mapping():
-    from hydra_mem.api import AsyncMemory
-
     qid = "mem0_u_alice"
     assert AsyncMemory._collection_bucket(qid, "memory") == qid
     assert AsyncMemory._collection_bucket(qid, "base") == qid
@@ -107,9 +105,8 @@ def test_hydradb_knowledge_collection_shape():
         def __init__(self):
             self.context = SimpleNamespace(ingest=_FakeIngest, status=None)
 
-    store = HydraDBStore("fake", base_url="http://127.0.0.1:1")
+    store = HydraDBStore("fake", base_url="http://127.0.0.1:1", client=_FakeClient())
     store._ready = True
-    store._client = _FakeClient()
 
     async def fake_ingest_items(self, qid, items, *, item_type="memory", collection=None):
         captured["ingest"] = (item_type, collection)
@@ -138,9 +135,8 @@ def test_hydradb_search_collections_passthrough():
             captured["query_kwargs"] = kwargs
             return _FakeQuery(SimpleNamespace(chunks=[], graph_context=None))
 
-    store = HydraDBStore("fake", base_url="http://127.0.0.1:1")
+    store = HydraDBStore("fake", base_url="http://127.0.0.1:1", client=_FakeClient())
     store._ready = True
-    store._client = _FakeClient()
 
     run(store.search("q1", "hello", collections=[{"name": "qid_q1", "weight": 0.7},
                                                  {"name": "qid_q1_knowledge", "weight": 0.3}]))

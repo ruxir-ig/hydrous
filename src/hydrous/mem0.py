@@ -22,7 +22,8 @@ Deliberate differences / supersets (all documented in README):
 
 Scope mapping: mem0 entities -> a hydrous question_id bucket
 (`mem0_u_alice_a_bob`), so each user/agent/run owns an isolated collection
-(local sqlite rows, or one HydraDB collection).
+(local SQLite rows, a local HydraDB OSS graph projection, or one legacy cloud
+HydraDB collection).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from hydrous.config import Settings, build_llm
 from hydrous.embeddings import TfidfEmbedder
 from hydrous.ingest.extractor import FactExtractor
 from hydrous.llm import LLMClient
-from hydrous.retrieve.pipeline import RetrievalPipeline
+from hydrous.retrieve.pipeline import _PREVIOUS_INTENT_RE, RetrievalPipeline
 from hydrous.schema import Session, Turn
 from hydrous.store.base import MemoryStore
 from hydrous.text_utils import tokenize
@@ -295,7 +296,7 @@ class AsyncMemory:
 
     def _default_ids_path(self) -> str:
         if self._store_backend == "hydradb":
-            return str(self._settings.data_dir / "hydra_mem_ids.json")
+            return str(self._settings.data_dir / "hydrous_ids.json")
         return str(Path(self._store_path or self._settings.store_path)) + ".ids.json"
 
     # ------------------------------------------------------------- internals
@@ -316,6 +317,31 @@ class AsyncMemory:
                     database=self._database or s.hydra_db_database,
                     base_url=self._base_url or s.hydra_db_base_url,
                     webhook_tracker=self._webhook_tracker,
+                )
+            elif self._store_backend == "hydradb-oss":
+                from hydrous.graph import GraphBackedStore, HydraDBOSSGraph
+                from hydrous.store.local import LocalMemoryStore
+
+                embedder = self._embedder
+                if embedder is None:
+                    try:
+                        from hydrous.config import build_default_embedder
+
+                        embedder = build_default_embedder(s)
+                    except Exception:
+                        embedder = TfidfEmbedder()
+                        log.warning("default embedder unavailable; using tfidf", exc_info=True)
+                token = self._api_key or s.resolve_hydradb_oss_token()
+                graph = HydraDBOSSGraph(
+                    token,
+                    base_url=self._base_url or s.hydra_db_oss_base_url,
+                    graph_id=s.hydra_db_oss_graph_id,
+                    namespace=s.hydra_db_oss_namespace,
+                    cell_id=s.hydra_db_oss_cell_id,
+                    timeout=s.request_timeout,
+                )
+                self._store = GraphBackedStore(
+                    LocalMemoryStore(self._store_path or s.store_path, embedder), graph
                 )
             else:
                 from hydrous.store.local import LocalMemoryStore
@@ -605,7 +631,7 @@ class AsyncMemory:
             str(query).strip(),
             as_of_date=as_of,
             top_k=max(int(top_k), 1),
-            include_superseded=False,
+            include_superseded=bool(_PREVIOUS_INTENT_RE.search(str(query))),
             **search_kwargs,
         )
         if not evs:
@@ -614,7 +640,7 @@ class AsyncMemory:
         ranked = [
             (
                 ev,
-                ev.fact_id if ev.source == "fact" else ev.session_id,
+                ev.fact_id if ev.source in ("fact", "graph") else ev.session_id,
                 _strip_role_prefix(ev.text),
             )
             for ev in evs
@@ -640,7 +666,7 @@ class AsyncMemory:
                 "id": mem_id,
                 "memory": text,
                 "hash": _content_hash(text),
-                "metadata": {"kind": "fact" if ev.source == "fact" else "session", "from_search": True},
+                "metadata": {"kind": ev.source, "from_search": True},
                 "score": round(norm, 4),
                 "created_at": ev.date,
                 "updated_at": ev.date,
@@ -648,8 +674,9 @@ class AsyncMemory:
             }
             if explain:
                 item["score_details"] = {"rrf": float(ev.score)}
-            self._seen[_content_hash(text)] = mem_id  # the feedback-loop tag
-            self._registry.set(mem_id, scope.question_id, scope.ids)
+            if ev.source != "graph":
+                self._seen[_content_hash(text)] = mem_id  # the feedback-loop tag
+                self._registry.set(mem_id, scope.question_id, scope.ids)
             out.append(item)
         return {"results": out}
 
@@ -1018,7 +1045,7 @@ class AsyncMemory:
         """Subscribe the HydraDB API key's org to `indexing.status_changed`.
 
         Requires `store="hydradb"` and a PUBLIC callback URL (e.g. a tunnel to
-        `hydra-mem serve`). Webhooks mark the shared IndexingTracker so ingests
+        `hydrous serve`). Webhooks mark the shared IndexingTracker so ingests
         stop polling."""
         store = await self._ensure_store()
         if not hasattr(store, "register_indexing_webhook"):
@@ -1032,7 +1059,7 @@ class AsyncMemory:
             try:
                 store.close()
             except Exception:
-                log.warning("hydra-mem store close failed", exc_info=True)
+                log.warning("hydrous store close failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1053,7 +1080,7 @@ class Memory:
         self._async = AsyncMemory(**kwargs)
         self._closed = False
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run_loop, name="hydra-mem-loop", daemon=True)
+        self._thread = threading.Thread(target=self._run_loop, name="hydrous-loop", daemon=True)
         self._thread.start()
 
     def _run_loop(self) -> None:
@@ -1112,7 +1139,7 @@ class Memory:
         try:
             self._run(self._async.close())  # release the store on its own loop
         except Exception:
-            log.warning("hydra-mem close: async close failed", exc_info=True)
+            log.warning("hydrous close: async close failed", exc_info=True)
         try:
             self._loop.call_soon_threadsafe(self._loop.stop)
         except RuntimeError:

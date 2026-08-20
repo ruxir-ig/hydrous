@@ -78,8 +78,8 @@ class Evidence(BaseModel):
 
     @property
     def key(self) -> str:
-        if self.source == "fact" and self.fact_id:
-            return f"fact:{self.fact_id}"
+        if self.source in ("fact", "graph") and self.fact_id:
+            return f"{self.source}:{self.fact_id}"
         return f"{self.source}:{self.session_id}"
 
 

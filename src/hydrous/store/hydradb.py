@@ -349,20 +349,24 @@ class HydraDBStore(MemoryStore):
         poll_timeout: float = 600.0,
         webhook_tracker: object | None = None,
         webhook_interval: float = 0.5,
+        client: object | None = None,
     ):
-        try:
-            from hydra_db import AsyncHydraDB
-        except ImportError as e:
-            raise RuntimeError(_SDK_HELP) from e
-        self._client = (
-            AsyncHydraDB(token=api_key, timeout=300.0)
-            if base_url is None
-            else AsyncHydraDB(token=api_key, base_url=base_url, timeout=300.0)
-        )
+        if client is not None:
+            self._client = client
+        else:
+            try:
+                from hydra_db import AsyncHydraDB
+            except ImportError as e:
+                raise RuntimeError(_SDK_HELP) from e
+            self._client = (
+                AsyncHydraDB(token=api_key, timeout=300.0)
+                if base_url is None
+                else AsyncHydraDB(token=api_key, base_url=base_url, timeout=300.0)
+            )
         self._database = database
         self._poll_interval = poll_interval
         self._poll_timeout = poll_timeout
-        # Webhook-driven indexing: when a tracker is attached (hydra-mem serve
+        # Webhook-driven indexing: when a tracker is attached (hydrous serve
         # --callback-url), _wait_indexed wakes on indexing.status_changed events
         # instead of polling; polling remains the fallback.
         self._webhook_tracker = webhook_tracker
@@ -446,7 +450,7 @@ class HydraDBStore(MemoryStore):
     ) -> None:
         """Subscribe this API key's org to `indexing.status_changed` events.
 
-        Requires a PUBLIC callback URL (e.g. a tunnel to `hydra-mem serve`).
+        Requires a PUBLIC callback URL (e.g. a tunnel to `hydrous serve`).
         Registering is per-org, so it also covers collections stored by other keys."""
         await self._client.webhooks.register(
             event_types=["indexing.status_changed"],

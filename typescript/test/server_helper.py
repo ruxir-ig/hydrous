@@ -1,4 +1,4 @@
-"""Test fixture: spawn a hydra-mem HTTP server with MockLLM on an ephemeral port.
+"""Test fixture: spawn a hydrous HTTP server with MockLLM on an ephemeral port.
 
 Prints {"port": N} on stdout once serving; the TS test parses it and SIGTERMs
 this process when done. Run from the repo root (src/ is put on sys.path).
@@ -16,11 +16,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-from hydra_mem import Memory  # noqa: E402
-from hydra_mem.indexing import IndexingTracker  # noqa: E402
-from hydra_mem.server import build_server  # noqa: E402
+from hydrous import Memory  # noqa: E402
 from hydrous.embeddings import TfidfEmbedder  # noqa: E402
+from hydrous.indexing import IndexingTracker  # noqa: E402
 from hydrous.llm import MockLLM  # noqa: E402
+from hydrous.server import build_server  # noqa: E402
 
 
 def main() -> None:

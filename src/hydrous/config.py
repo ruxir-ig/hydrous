@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     hydra_db_api_key: str | None = None
     hydra_db_base_url: str | None = None  # None -> SDK default (https://api.hydradb.com)
     hydra_db_database: str = "hydrous"
+    # Native HydraDB OSS graph node (no SDK; local by default).
+    hydra_db_oss_token: str | None = None
+    hydra_db_oss_token_file: Path = Path(".hydradb/auth-token")
+    hydra_db_oss_base_url: str = "http://127.0.0.1:8443"
+    hydra_db_oss_graph_id: str = "default"
+    hydra_db_oss_namespace: str = "default"
+    hydra_db_oss_cell_id: str = "cell-0"
 
     data_dir: Path = Path("data")
     store_path: Path = Path("data/hydrous.sqlite3")
@@ -72,6 +79,20 @@ class Settings(BaseSettings):
         if not key:
             raise ValueError(f"Missing API key: set {var} in .env (or use LLM_PROVIDER=mock)")
         return base_url, key
+
+    def resolve_hydradb_oss_token(self) -> str:
+        """Resolve the local graph-node bearer token without SDK/cloud config."""
+        if self.hydra_db_oss_token:
+            return self.hydra_db_oss_token
+        try:
+            token = self.hydra_db_oss_token_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(
+                "HydraDB OSS token missing: create .hydradb/auth-token or set HYDRA_DB_OSS_TOKEN"
+            ) from exc
+        if not token:
+            raise ValueError(f"HydraDB OSS token file is empty: {self.hydra_db_oss_token_file}")
+        return token
 
 
 def build_llm(settings: Settings, *, force_mock: bool = False) -> LLMClient:

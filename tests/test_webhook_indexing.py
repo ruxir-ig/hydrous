@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hydra_mem.indexing import IndexingTracker
+from hydrous.indexing import IndexingTracker
 from hydrous.store.hydradb import HydraDBStore
 
 from .conftest import run
@@ -43,12 +43,11 @@ class _FakeClient:
 
 
 def _store(client, tracker=None, *, poll_timeout=10.0, webhook_interval=0.05) -> HydraDBStore:
-    s = HydraDBStore(
+    return HydraDBStore(
         "fake-key", base_url="http://127.0.0.1:1",
         webhook_tracker=tracker, webhook_interval=webhook_interval, poll_timeout=poll_timeout,
+        client=client,
     )
-    s._client = client
-    return s
 
 
 def test_tracker_mark_done_failed_clear():

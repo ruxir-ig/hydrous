@@ -3,7 +3,7 @@
  *
  * Mirrors the mem0 SDK surface (add / search / get_all / get / history / update /
  * delete / delete_all / reset) plus the hydrous extensions (chat, add_knowledge,
- * reference_date time-travel) over the `hydra-mem serve` HTTP bridge:
+ * reference_date time-travel) over the `hydrous serve` HTTP bridge:
  *
  * ```ts
  * import { Memory } from "hydrous-ts";
@@ -49,7 +49,7 @@ export interface SearchQuery {
   threshold?: number;
   rerank?: boolean;
   explain?: boolean;
-  reference_date?: string | null; // hydrous: time-travel as-of (mem0 OSS raises)
+  reference_date?: string | null; // as-of time-travel over validity intervals
   collections?: { name: string; weight: number }[]; // hydrous: multi-corpus weighting
 }
 
@@ -76,7 +76,7 @@ export interface Messaging {
 }
 
 export interface MemoryOptions {
-  /** hydra-mem server base URL (the `hydra-mem serve` bridge). */
+  /** hydrous server base URL (the `hydrous serve` bridge). */
   baseUrl?: string;
   /** Optional Authorization bearer token (server may be behind a proxy). */
   apiKey?: string;
@@ -207,6 +207,6 @@ export class Memory {
   }
 }
 
-/** AsyncMemory alias: the hydra-mem server is async-backed end to end, so one
+/** AsyncMemory alias: the hydrous server is async-backed end to end, so one
  * class mirrors both mem0 `Memory` and `AsyncMemory` surfaces. */
 export { Memory as AsyncMemory };

@@ -1,7 +1,7 @@
 """Webhook-driven indexing for the HydraDB adapter.
 
 HydraDB fires `indexing.status_changed` webhook events to a registered public
-callback URL. When one is configured (hydra-mem serve --callback-url ...), the
+callback URL. When one is configured (hydrous serve --callback-url ...), the
 server's `/webhooks/hydradb/indexing` endpoint marks sources in this tracker and
 `HydraDBStore._wait_indexed` wakes within ~0.5s instead of a 2s polling loop —
 one `context.status` confirmation (or none if every source is marked) replaces

@@ -22,10 +22,10 @@ import sqlite3
 
 import pytest
 
-from hydra_mem import AsyncMemory, Memory
-from hydra_mem.api import _Scope
+from hydrous import AsyncMemory, Memory
 from hydrous.embeddings import TfidfEmbedder
 from hydrous.llm import MockLLM
+from hydrous.mem0 import _Scope
 from hydrous.schema import ABSTAIN_STRING, Fact
 from hydrous.store.local import LocalMemoryStore
 
@@ -81,6 +81,32 @@ def test_add_raw_string_roundtrip(mem):
     # search returns the bare content (role prefixes stripped), like mem0
     assert found[0]["memory"] == "I love hiking on weekends"
     assert found[0]["id"] == added["id"]
+
+
+def test_search_previous_intent_includes_superseded_facts(mem, tmp_path):
+    qid = _Scope(user_id="public-search-laptop").question_id
+    seeder = LocalMemoryStore(tmp_path / "mem.sqlite3", TfidfEmbedder())
+    run(seeder.add_facts(qid, [
+        Fact(
+            id="public_dell", question_id=qid, subject="user", predicate="uses_laptop",
+            value="Dell XPS 13", fact_date="2023-06-01", session_id="s1",
+            valid_from="2023-06-01", valid_to="2024-03-15", superseded_by="public_macbook",
+        ),
+        Fact(
+            id="public_macbook", question_id=qid, subject="user", predicate="uses_laptop",
+            value="MacBook Pro", fact_date="2024-03-15", session_id="s2",
+            valid_from="2024-03-15",
+        ),
+    ]))
+    seeder.close()
+
+    results = mem.search(
+        "what laptop did I use before the MacBook?",
+        filters={"user_id": "public-search-laptop"},
+        top_k=10,
+    )["results"]
+
+    assert {item["id"] for item in results} >= {"public_dell", "public_macbook"}
 
 
 def test_add_messages_list_roles_and_system_skip(mem):
@@ -290,7 +316,7 @@ def test_expiration_date_stored_in_metadata(mem):
     assert meta["expiration_date"] == "2020-12-31"
 
 
-# ------------------------------------------- get / history (Phase 2.1 patch)
+# ------------------------------------------- get / history
 
 
 def test_get_returns_mem0_shape_and_none_for_unknown(mem):

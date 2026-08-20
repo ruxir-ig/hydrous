@@ -1,13 +1,14 @@
 # data & artifacts
 data/
 cache/
+.hydradb/
+.firecrawl/
 *.sqlite3
 hypotheses*.jsonl
 *.jsonl.log
 
 # env / secrets
 .env
-RUN_NOTES.md
 
 # python
 __pycache__/

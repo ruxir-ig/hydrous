@@ -1,5 +1,5 @@
 /**
- * End-to-end SDK test: spawns the real hydra-mem Python server (MockLLM + a
+ * End-to-end SDK test: spawns the real hydrous Python server (MockLLM + a
  * throwaway sqlite), then exercises the whole TypeScript surface over HTTP.
  *
  * Run: npm test  (from typescript/)

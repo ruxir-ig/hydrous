@@ -1,4 +1,4 @@
-"""mem0 export loading for `hydra-mem import-mem0`.
+"""mem0 export loading for `hydrous import-mem0`.
 
 A mem0 `get_all` export looks like:
 

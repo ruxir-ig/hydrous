@@ -1,12 +1,12 @@
-"""hydra-mem import-mem0: replay a mem0 get_all export, preserving created_at -> recorded_at."""
+"""hydrous import-mem0: replay a mem0 get_all export, preserving created_at -> recorded_at."""
 
 import json
 
 import pytest
 
-from hydra_mem import Memory
-from hydra_mem.importer import load_mem0_export
+from hydrous import Memory
 from hydrous.embeddings import TfidfEmbedder
+from hydrous.importer import load_mem0_export
 from hydrous.llm import MockLLM
 
 _CREATED = "2025-01-15T10:30:00Z"

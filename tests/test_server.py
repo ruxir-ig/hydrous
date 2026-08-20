@@ -7,12 +7,12 @@ import urllib.request
 
 import pytest
 
-from hydra_mem import Memory
-from hydra_mem.indexing import IndexingTracker
-from hydra_mem.server import build_server
+from hydrous import Memory
 from hydrous.embeddings import TfidfEmbedder
+from hydrous.indexing import IndexingTracker
 from hydrous.llm import MockLLM
 from hydrous.schema import ABSTAIN_STRING
+from hydrous.server import build_server
 
 
 @pytest.fixture
@@ -44,9 +44,17 @@ def _call(server, method: str, path: str, body: dict | None = None) -> tuple[int
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status, json.loads(resp.read().decode())
+            text = resp.read().decode()
+            try:
+                return resp.status, json.loads(text)
+            except json.JSONDecodeError:
+                return resp.status, text
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode())
+        text = e.read().decode()
+        try:
+            return e.code, json.loads(text)
+        except json.JSONDecodeError:
+            return e.code, text
 
 
 def test_health(server):
@@ -128,3 +136,39 @@ def test_webhook_endpoint_marks_tracker(server):
 def test_unknown_route_404(server):
     assert _call(server, "GET", "/nope")[0] == 404
     assert _call(server, "POST", "/nope")[0] == 404
+
+
+def test_playground_and_status_api(server):
+    code, _ = _call(server, "GET", "/playground")
+    assert code == 200
+
+    code, status = _call(server, "GET", "/api/status")
+    assert code == 200 and status["status"] == "online"
+    assert status["store"] == "local"
+    assert "SQLite" in status["engine"]
+
+
+def test_graph_and_demos_run_api(server):
+    # Run Demo 1 (Laptop supersession)
+    code, d1 = _call(server, "POST", "/api/demos/run", {"demo_id": 1, "user_id": "demo"})
+    assert code == 200
+    assert d1["demo_id"] == 1
+    assert "Laptop Supersession" in d1["title"]
+    assert "SUPERSEDED_BY" in d1["cypher"]
+    assert len(d1["graph"]["facts"]) >= 4
+
+    # Run Demo 3 (Abstention)
+    code, d3 = _call(server, "POST", "/api/demos/run", {"demo_id": 3, "user_id": "demo"})
+    assert code == 200
+    assert d3["is_abstention"] is True
+    assert d3["chat_answer"] == ABSTAIN_STRING
+
+    # GET /api/graph
+    code, g = _call(server, "GET", "/api/graph?user_id=demo")
+    assert code == 200
+    assert len(g["entities"]) >= 4
+    assert len(g["edges"]) >= 4
+    supers = [e for e in g["edges"] if e["type"] == "supersession"]
+    assert any(
+        e["source"] == "entity:Dell XPS 13" and e["target"] == "entity:MacBook Pro" for e in supers
+    )

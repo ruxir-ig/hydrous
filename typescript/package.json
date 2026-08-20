@@ -1,7 +1,7 @@
 {
   "name": "hydrous-ts",
   "version": "0.1.0",
-  "description": "TypeScript SDK for hydrous — mem0-compatible memory API (add/search/get_all/get/history/update/delete/chat) over the hydra-mem HTTP server",
+  "description": "TypeScript SDK for Hydrous — bi-temporal memory API over the hydrous HTTP server",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,7 +18,7 @@
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs"
   },
-  "keywords": ["memory", "agent", "mem0", "llm", "bi-temporal", "rag"],
+  "keywords": ["memory", "agent", "llm", "bi-temporal", "rag", "hydradb"],
   "license": "AGPL-3.0-only",
   "engines": { "node": ">=18" }
 }
